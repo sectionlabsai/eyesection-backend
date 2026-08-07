@@ -25,7 +25,9 @@ const WEEKLY_REPORT_EVERY_MS = 24 * 60 * 60 * 1000; // once per day
 const ANON_CLEANUP_EVERY_MS = 24 * 60 * 60 * 1000; // once per day
 
 function makeConnection(): IORedis {
-  return new IORedis(env.REDIS_URL, { maxRetriesPerRequest: null });
+  // family:0 = dual-stack DNS so Railway's IPv6-only redis.railway.internal
+  // resolves; harmless for localhost / public URLs.
+  return new IORedis(env.REDIS_URL, { maxRetriesPerRequest: null, family: 0 });
 }
 
 let queue: Queue | null = null;

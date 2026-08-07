@@ -15,6 +15,10 @@ export function getRedis(): Redis {
   client = new IORedis(env.REDIS_URL, {
     maxRetriesPerRequest: 3,
     lazyConnect: false,
+    // Railway's private network (redis.railway.internal) is IPv6-only; ioredis
+    // defaults to IPv4 lookups. family:0 enables dual-stack DNS so the hostname
+    // resolves in prod. Harmless for localhost / public URLs.
+    family: 0,
   });
   client.on('error', (err) => logger.error('Redis error', err));
   client.on('connect', () => logger.info('Redis connected'));

@@ -22,6 +22,12 @@ const schema = z.object({
   // 'separate' runs them only in the dedicated worker entrypoint (src/worker.ts).
   WORKER_MODE: z.enum(['inline', 'separate']).default('inline'),
 
+  // How many scans the analyze worker processes at once. Each scan fires 3
+  // parallel OpenAI vision calls (SAMPLES), so peak concurrent OpenAI requests
+  // = ANALYZE_CONCURRENCY × 3. Raise to increase throughput, but keep
+  // (value × 3) under your OpenAI rate limit (RPM/TPM) and DB pool headroom.
+  ANALYZE_CONCURRENCY: z.coerce.number().int().min(1).max(50).default(3),
+
   // Days a never-upgraded anonymous-first user (EB-13) is kept before the daily
   // cleanup job purges it via the GDPR cascade.
   ANON_TTL_DAYS: z.coerce.number().int().min(1).default(30),
@@ -55,16 +61,16 @@ const schema = z.object({
   S3_BUCKET: z.string().optional(),
   OPENAI_API_KEY: z.string().optional(),
   // Vision model used for eye-area appearance rating (EB-05/EB-14). Default
-  // 'gpt-4o' — OpenAI's flagship multimodal model, chosen for the fine-grained
+  // 'gpt-5.6-sol' — OpenAI's flagship multimodal model, chosen for the fine-grained
   // appearance grading on the high-detail eye crop and for its Structured
   // Outputs support (json_schema, strict) used by the ensemble. Step down to
-  // 'gpt-4o-mini' if scans go high-volume and cost-sensitive.
-  OPENAI_MODEL: z.string().default('gpt-4o'),
+  // 'gpt-5.6-terra' / 'gpt-5.6-luna' if scans go high-volume and cost-sensitive.
+  OPENAI_MODEL: z.string().default('gpt-5.6-sol'),
   // Text-only model for the routine "tips" generator and the AI chat (EB-13).
-  // These paths need no vision acuity, so they run on 'gpt-4o-mini' — the most
-  // cost-effective tier that still supports Structured Outputs — instead of the
-  // pricier vision model above.
-  OPENAI_TEXT_MODEL: z.string().default('gpt-4o-mini'),
+  // These paths need no vision acuity, so they run on 'gpt-5' — a solid
+  // general model that still supports Structured Outputs — instead of the
+  // pricier vision flagship above.
+  OPENAI_TEXT_MODEL: z.string().default('gpt-5'),
   // Optional ascending "a,b,c" cutoff overrides for the code-measured LAB metrics
   // (EB-05/EB-14); produced by `npm run calibrate:thresholds`.
   DARK_CIRCLE_THRESHOLDS: z.string().optional(),

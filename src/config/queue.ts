@@ -15,7 +15,9 @@ export interface AnalyzeJobData {
 }
 
 function makeConnection(): IORedis {
-  return new IORedis(env.REDIS_URL, { maxRetriesPerRequest: null });
+  // family:0 = dual-stack DNS so Railway's IPv6-only redis.railway.internal
+  // resolves; harmless for localhost / public URLs.
+  return new IORedis(env.REDIS_URL, { maxRetriesPerRequest: null, family: 0 });
 }
 
 let queue: Queue<AnalyzeJobData> | null = null;
@@ -50,7 +52,7 @@ export function startAnalyzeWorker(): Worker<AnalyzeJobData> {
     async (job: Job<AnalyzeJobData>) => {
       await processScan(job.data.scanId);
     },
-    { connection: makeConnection(), concurrency: 3 },
+    { connection: makeConnection(), concurrency: env.ANALYZE_CONCURRENCY },
   );
 
   worker.on('failed', (job, err) =>

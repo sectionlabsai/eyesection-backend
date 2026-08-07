@@ -17,7 +17,9 @@ export interface BroadcastJobData {
 }
 
 function makeConnection(): IORedis {
-  return new IORedis(env.REDIS_URL, { maxRetriesPerRequest: null });
+  // family:0 = dual-stack DNS so Railway's IPv6-only redis.railway.internal
+  // resolves; harmless for localhost / public URLs.
+  return new IORedis(env.REDIS_URL, { maxRetriesPerRequest: null, family: 0 });
 }
 
 let queue: Queue<BroadcastJobData> | null = null;
