@@ -241,7 +241,7 @@ export type Segment = 'all' | 'premium' | 'free' | 'trial';
 
 const FCM_MULTICAST_LIMIT = 500; // FCM caps sendEachForMulticast at 500 tokens
 
-function segmentQuery(segment: Segment): Record<string, unknown> {
+export function segmentQuery(segment: Segment): Record<string, unknown> {
   switch (segment) {
     case 'premium':
       return { 'subscription.status': { $in: ['active', 'trial'] } };

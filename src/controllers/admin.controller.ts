@@ -19,10 +19,30 @@ export async function login(req: Request, res: Response): Promise<void> {
   res.status(200).json(await adminService.login(email, password));
 }
 
+export async function me(req: Request, res: Response): Promise<void> {
+  res.status(200).json({ admin: await adminService.me(req.adminId as string) });
+}
+
 /* ------------------------------- Stats --------------------------------- */
 
 export async function statsOverview(_req: Request, res: Response): Promise<void> {
   res.status(200).json(await adminService.statsOverview());
+}
+
+export async function statsGrowth(_req: Request, res: Response): Promise<void> {
+  res.status(200).json(await adminService.statsGrowth());
+}
+
+export async function statsScans(_req: Request, res: Response): Promise<void> {
+  res.status(200).json(await adminService.statsScans());
+}
+
+export async function statsRevenue(_req: Request, res: Response): Promise<void> {
+  res.status(200).json(await adminService.statsRevenue());
+}
+
+export async function needsAttention(_req: Request, res: Response): Promise<void> {
+  res.status(200).json(await adminService.needsAttention());
 }
 
 /* ------------------------------- Users --------------------------------- */
@@ -86,6 +106,10 @@ export async function purgeExpired(_req: Request, res: Response): Promise<void> 
   res.status(200).json(await adminService.purgeExpiredRaw());
 }
 
+export async function pendingDeletion(_req: Request, res: Response): Promise<void> {
+  res.status(200).json(await adminService.pendingDeletion());
+}
+
 /* --------------------------- Subscriptions ----------------------------- */
 
 const listSubsQuery = pageQuery.extend({ plan: z.string().trim().min(1).optional() });
@@ -97,6 +121,10 @@ export async function listSubscriptions(req: Request, res: Response): Promise<vo
 
 export async function refreshSubscription(req: Request, res: Response): Promise<void> {
   res.status(200).json(await adminService.refreshSubscription(req.params.userId));
+}
+
+export async function subscriptionStats(_req: Request, res: Response): Promise<void> {
+  res.status(200).json(await adminService.subscriptionStats());
 }
 
 /* ----------------------------- Exercises ------------------------------- */
@@ -142,7 +170,43 @@ const sendNotificationSchema = z
 
 export async function sendNotification(req: Request, res: Response): Promise<void> {
   const body = sendNotificationSchema.parse(req.body);
-  res.status(200).json(await adminService.sendNotification(body));
+  res.status(200).json(await adminService.sendNotification(body, req.adminId));
+}
+
+const estimateSchema = z
+  .object({
+    userId: z.string().min(1).optional(),
+    segment: z.enum(['all', 'premium', 'free', 'trial']).optional(),
+  })
+  .refine((v) => !!v.userId || !!v.segment, { message: 'Provide either userId or segment' });
+
+export async function estimateAudience(req: Request, res: Response): Promise<void> {
+  const body = estimateSchema.parse(req.body);
+  res.status(200).json(await adminService.estimateAudience(body));
+}
+
+export async function notificationHistory(req: Request, res: Response): Promise<void> {
+  const q = pageQuery.parse(req.query);
+  res.status(200).json(await adminService.notificationHistory(q));
+}
+
+/* ------------------------------- Jobs ---------------------------------- */
+
+const jobsQuery = z.object({
+  status: z.enum(['failed', 'active', 'waiting', 'completed']).optional(),
+});
+
+export async function listJobs(req: Request, res: Response): Promise<void> {
+  const { status } = jobsQuery.parse(req.query);
+  res.status(200).json(await adminService.listJobs({ status }));
+}
+
+export async function retryJob(req: Request, res: Response): Promise<void> {
+  res.status(200).json(await adminService.retryJob(req.params.id));
+}
+
+export async function retryAllJobs(_req: Request, res: Response): Promise<void> {
+  res.status(200).json(await adminService.retryAllFailed());
 }
 
 export async function systemHealth(_req: Request, res: Response): Promise<void> {

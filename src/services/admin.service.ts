@@ -8,6 +8,7 @@ import {
   ExerciseSession,
   Exercise,
   Report,
+  AdminNotificationLog,
 } from '../models';
 import { AppError } from '../middleware/error';
 import { signAdminToken } from '../middleware/adminAuth';
@@ -65,6 +66,13 @@ export async function login(
   };
 }
 
+/** Resolve the admin behind a valid token (for /auth/me refresh). */
+export async function me(adminId: string): Promise<Record<string, unknown>> {
+  const admin = await AdminUser.findById(adminId);
+  if (!admin) throw new AppError(401, 'Admin not found', 'ADMIN_UNAUTHENTICATED');
+  return { id: admin._id.toString(), email: admin.email, role: admin.role };
+}
+
 /* ------------------------------- Stats --------------------------------- */
 
 export async function statsOverview(): Promise<Record<string, unknown>> {
@@ -110,6 +118,111 @@ export async function statsOverview(): Promise<Record<string, unknown>> {
     queueDepth,
     failedScans24h,
   };
+}
+
+/* --------------------------- Stats: trends ----------------------------- */
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Build a zero-filled map of the last `days` day-keys (YYYY-MM-DD, UTC). */
+function emptyDayBuckets(days: number): Map<string, number> {
+  const map = new Map<string, number>();
+  const start = new Date(Date.now() - (days - 1) * DAY_MS);
+  for (let i = 0; i < days; i++) {
+    const d = new Date(start.getTime() + i * DAY_MS);
+    map.set(d.toISOString().slice(0, 10), 0);
+  }
+  return map;
+}
+
+async function countByDay(
+  model: typeof User | typeof EyeScan,
+  dateField: string,
+  days: number,
+): Promise<Map<string, number>> {
+  const since = new Date(Date.now() - (days - 1) * DAY_MS);
+  const rows = await model.aggregate<{ _id: string; count: number }>([
+    { $match: { [dateField]: { $gte: since } } },
+    {
+      $group: {
+        _id: { $dateToString: { format: '%Y-%m-%d', date: `$${dateField}`, timezone: 'UTC' } },
+        count: { $sum: 1 },
+      },
+    },
+  ]);
+  const buckets = emptyDayBuckets(days);
+  for (const r of rows) if (buckets.has(r._id)) buckets.set(r._id, r.count);
+  return buckets;
+}
+
+/** Daily signups over the last 30 days, plus a running cumulative total. */
+export async function statsGrowth(days = 30): Promise<Record<string, unknown>[]> {
+  const buckets = await countByDay(User, 'createdAt', days);
+  const since = new Date(Date.now() - (days - 1) * DAY_MS);
+  let running = await User.countDocuments({ createdAt: { $lt: since } });
+  return [...buckets.entries()].map(([date, signups]) => {
+    running += signups;
+    return { date, signups, total: running };
+  });
+}
+
+/** Daily scan volume over the last 30 days. */
+export async function statsScans(days = 30): Promise<Record<string, unknown>[]> {
+  const buckets = await countByDay(EyeScan, 'createdAt', days);
+  return [...buckets.entries()].map(([date, count]) => ({ date, count }));
+}
+
+/**
+ * Daily revenue estimate. There is no purchase-event store, so this spreads the
+ * current MRR evenly across the window as a display-only approximation.
+ */
+export async function statsRevenue(days = 30): Promise<Record<string, unknown>[]> {
+  const [monthlyActive, annualActive] = await Promise.all([
+    User.countDocuments({ 'subscription.status': 'active', 'subscription.plan': 'monthly' }),
+    User.countDocuments({ 'subscription.status': 'active', 'subscription.plan': 'annual' }),
+  ]);
+  const mrr = monthlyActive * PRICE_MONTHLY + annualActive * PRICE_ANNUAL_MONTHLY_EQ;
+  const daily = Math.round((mrr / 30) * 100) / 100;
+  const buckets = emptyDayBuckets(days);
+  return [...buckets.keys()].map((date) => ({ date, usd: daily }));
+}
+
+/** Actionable items surfaced on the overview page. */
+export async function needsAttention(): Promise<Record<string, unknown>> {
+  const since24h = new Date(Date.now() - DAY_MS);
+  const [failedScans, expiredSubs, exportJobs] = await Promise.all([
+    EyeScan.countDocuments({ status: 'failed', updatedAt: { $gte: since24h } }),
+    User.countDocuments({ 'subscription.status': 'expired' }),
+    getExportQueue().getJobCounts('waiting', 'active'),
+  ]);
+  const pendingGdpr = (exportJobs.waiting ?? 0) + (exportJobs.active ?? 0);
+
+  const items: Record<string, unknown>[] = [];
+  if (failedScans > 0) {
+    items.push({
+      id: 'failed_scans',
+      kind: 'failed_scans',
+      label: `${failedScans} failed scan${failedScans === 1 ? '' : 's'} in the last 24h`,
+      href: '/scans?status=failed',
+    });
+  }
+  if (pendingGdpr > 0) {
+    items.push({
+      id: 'gdpr_pending',
+      kind: 'gdpr_pending',
+      label: `${pendingGdpr} GDPR export${pendingGdpr === 1 ? '' : 's'} in progress`,
+      href: '/gdpr-requests',
+    });
+  }
+  if (expiredSubs > 0) {
+    items.push({
+      id: 'expired_subs',
+      kind: 'expired_subs',
+      label: `${expiredSubs} expired subscription${expiredSubs === 1 ? '' : 's'}`,
+      href: '/subscriptions?plan=expired',
+    });
+  }
+  return { items };
 }
 
 /* ------------------------------- Users --------------------------------- */
@@ -169,6 +282,9 @@ export async function getUser(userId: string): Promise<Record<string, unknown>> 
     status: user.status,
     authProvider: user.authProvider,
     concerns: user.concerns,
+    goal: user.goal,
+    careProducts: user.careProducts,
+    baselineComfort: user.baselineComfort,
     screenProfile: user.screenProfile,
     subscription: user.subscription,
     consent: user.consent,
@@ -316,6 +432,29 @@ export async function purgeExpiredRaw(): Promise<Record<string, unknown>> {
   return { scansPurged: cleared };
 }
 
+/** Scans that still hold raw photos scheduled for deletion (retention view). */
+export async function pendingDeletion(limit = 50): Promise<Record<string, unknown>> {
+  const scans = await EyeScan.find({ rawDeleteAt: { $exists: true, $ne: null } })
+    .sort({ rawDeleteAt: 1 })
+    .limit(limit)
+    .populate<{ userId: { email?: string } | null }>('userId', 'email');
+
+  const now = Date.now();
+  const photos = await Promise.all(
+    scans.map(async (s) => ({
+      scanId: s._id.toString(),
+      thumbnailUrl: s.images.front?.thumb ? await getSignedUrl(s.images.front.thumb) : null,
+      userEmail:
+        s.userId && typeof s.userId === 'object' && 'email' in s.userId
+          ? (s.userId as { email?: string }).email ?? null
+          : null,
+      deleteAt: s.rawDeleteAt ?? null,
+      ageHours: Math.max(0, Math.round((now - new Date(s.createdAt).getTime()) / 3_600_000)),
+    })),
+  );
+  return { photos };
+}
+
 /* --------------------------- Subscriptions ----------------------------- */
 
 export async function listSubscriptions(opts: {
@@ -350,6 +489,19 @@ export async function listSubscriptions(opts: {
 
 export async function refreshSubscription(userId: string): Promise<Record<string, unknown>> {
   return refreshFromRevenueCat(userId);
+}
+
+export async function subscriptionStats(): Promise<Record<string, unknown>> {
+  const [activeCount, trialCount, expiredCount, monthlyCount, annualCount] = await Promise.all([
+    User.countDocuments({ 'subscription.status': 'active' }),
+    User.countDocuments({ 'subscription.status': 'trial' }),
+    User.countDocuments({ 'subscription.status': 'expired' }),
+    User.countDocuments({ 'subscription.status': 'active', 'subscription.plan': 'monthly' }),
+    User.countDocuments({ 'subscription.status': 'active', 'subscription.plan': 'annual' }),
+  ]);
+  const mrr =
+    Math.round((monthlyCount * PRICE_MONTHLY + annualCount * PRICE_ANNUAL_MONTHLY_EQ) * 100) / 100;
+  return { activeCount, trialCount, expiredCount, monthlyCount, annualCount, mrr };
 }
 
 /* ----------------------------- Exercises ------------------------------- */
@@ -415,14 +567,47 @@ export async function gdprRequests(): Promise<Record<string, unknown>> {
   return { exports, deletions: 'processed synchronously on request' };
 }
 
-export async function sendNotification(opts: {
+const SEGMENT_LABEL: Record<string, string> = {
+  all: 'All users',
+  premium: 'Premium users',
+  free: 'Free users',
+  trial: 'Trial users',
+};
+
+/** Estimate how many users a send would target (best-effort, pre-token filter). */
+export async function estimateAudience(opts: {
   userId?: string;
   segment?: 'all' | 'premium' | 'free' | 'trial';
-  title: string;
-  body: string;
-  data?: Record<string, string>;
 }): Promise<Record<string, unknown>> {
+  if (opts.userId) return { count: 1 };
+  if (!opts.segment) return { count: 0 };
+  const count = await User.countDocuments(notifications.segmentQuery(opts.segment as Segment));
+  return { count };
+}
+
+export async function sendNotification(
+  opts: {
+    userId?: string;
+    segment?: 'all' | 'premium' | 'free' | 'trial';
+    title: string;
+    body: string;
+    data?: Record<string, string>;
+  },
+  adminId?: string,
+): Promise<Record<string, unknown>> {
   const payload = { title: opts.title, body: opts.body, data: opts.data };
+
+  async function log(audienceLabel: string, recipientCount: number): Promise<void> {
+    await AdminNotificationLog.create({
+      title: opts.title,
+      body: opts.body,
+      audienceLabel,
+      segment: opts.segment,
+      userId: opts.userId,
+      recipientCount,
+      sentByAdminId: adminId,
+    });
+  }
 
   // Single user: send synchronously (fast, one multicast).
   if (opts.userId) {
@@ -430,13 +615,88 @@ export async function sendNotification(opts: {
       category: 'results',
       transactional: true,
     });
+    await log('Single user', 1);
     return { mode: 'direct', targeted: 1, result };
   }
 
   // Segment: fan out off the request thread via the broadcast queue, which
   // sends in FCM multicast batches. Returns immediately with the job id.
   const jobId = await enqueueBroadcast({ segment: opts.segment as Segment, payload });
+  const est = await estimateAudience({ segment: opts.segment });
+  await log(SEGMENT_LABEL[opts.segment ?? 'all'] ?? 'Segment', Number(est.count) || 0);
   return { mode: 'queued', jobId, segment: opts.segment };
+}
+
+/** Paginated history of admin-sent notifications. */
+export async function notificationHistory(opts: {
+  page: number;
+  limit: number;
+}): Promise<Paginated<Record<string, unknown>>> {
+  const [total, rows] = await Promise.all([
+    AdminNotificationLog.countDocuments(),
+    AdminNotificationLog.find()
+      .sort({ createdAt: -1 })
+      .skip((opts.page - 1) * opts.limit)
+      .limit(opts.limit),
+  ]);
+  const data = rows.map((r) => ({
+    id: r._id.toString(),
+    title: r.title,
+    body: r.body,
+    audienceLabel: r.audienceLabel,
+    recipientCount: r.recipientCount,
+    sentAt: r.createdAt,
+  }));
+  return paginate(data, opts.page, total, opts.limit);
+}
+
+/* ----------------------------- Failed jobs ----------------------------- */
+
+interface JobView {
+  id: string | null;
+  type: string;
+  failureReason: string | null;
+  failedAt: Date | null;
+  scan?: { id: string };
+}
+
+export async function listJobs(opts: {
+  status?: 'failed' | 'active' | 'waiting' | 'completed';
+  limit?: number;
+}): Promise<Record<string, unknown>> {
+  const status = opts.status ?? 'failed';
+  const limit = opts.limit ?? 50;
+  const queue = getAnalyzeQueue();
+  const jobs = await queue.getJobs([status], 0, limit - 1);
+  const data: JobView[] = jobs.map((j) => ({
+    id: j.id ?? null,
+    type: 'analyze-eye-scan',
+    failureReason: j.failedReason ?? null,
+    failedAt: j.finishedOn ? new Date(j.finishedOn) : j.timestamp ? new Date(j.timestamp) : null,
+    scan: j.data?.scanId ? { id: j.data.scanId } : undefined,
+  }));
+  return { jobs: data, total: data.length };
+}
+
+export async function retryJob(jobId: string): Promise<Record<string, unknown>> {
+  const job = await getAnalyzeQueue().getJob(jobId);
+  if (!job) throw new AppError(404, 'Job not found', 'JOB_NOT_FOUND');
+  await job.retry();
+  return { id: jobId, retried: true };
+}
+
+export async function retryAllFailed(): Promise<Record<string, unknown>> {
+  const jobs = await getAnalyzeQueue().getJobs(['failed'], 0, 999);
+  let retried = 0;
+  for (const job of jobs) {
+    try {
+      await job.retry();
+      retried += 1;
+    } catch {
+      // Skip jobs that are no longer retryable.
+    }
+  }
+  return { retried };
 }
 
 export async function systemHealth(): Promise<Record<string, unknown>> {

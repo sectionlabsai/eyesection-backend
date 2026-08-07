@@ -41,7 +41,8 @@ export async function enqueueAnalyzeScan(scanId: string): Promise<void> {
 }
 
 /**
- * Starts the analysis worker (EB-05 pipeline). Concurrency 3.
+ * Starts the analysis worker (EB-05 pipeline). Concurrency from
+ * env.ANALYZE_CONCURRENCY (default 10).
  * The handler itself never throws for expected/analysis failures — those are
  * recorded on the scan as status 'failed'; it only throws for infrastructure
  * errors so BullMQ retries them.

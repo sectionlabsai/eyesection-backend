@@ -26,7 +26,7 @@ const schema = z.object({
   // parallel OpenAI vision calls (SAMPLES), so peak concurrent OpenAI requests
   // = ANALYZE_CONCURRENCY × 3. Raise to increase throughput, but keep
   // (value × 3) under your OpenAI rate limit (RPM/TPM) and DB pool headroom.
-  ANALYZE_CONCURRENCY: z.coerce.number().int().min(1).max(50).default(3),
+  ANALYZE_CONCURRENCY: z.coerce.number().int().min(1).max(50).default(10),
 
   // Days a never-upgraded anonymous-first user (EB-13) is kept before the daily
   // cleanup job purges it via the GDPR cascade.
