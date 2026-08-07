@@ -1,0 +1,54 @@
+{
+  "name": "eyesection-api",
+  "version": "0.1.0",
+  "description": "Backend for EyeSection — AI eye-area aesthetics & eye-comfort wellness app. Cosmetic & wellness only.",
+  "main": "dist/server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
+    "worker": "ts-node-dev --respawn --transpile-only src/worker.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/server.js",
+    "start:worker": "node dist/worker.js",
+    "lint": "eslint \"src/**/*.ts\"",
+    "typecheck": "tsc --noEmit",
+    "test": "TS_NODE_TRANSPILE_ONLY=1 node --require ts-node/register --require ./src/test/setup.ts --test \"src/**/*.test.ts\"",
+    "ci": "npm run lint && npm run typecheck && npm test",
+    "seed:iris": "ts-node-dev --transpile-only src/jobs/seedIris.ts",
+    "seed:exercises": "ts-node-dev --transpile-only src/jobs/seedExercises.ts",
+    "seed:admin": "ts-node-dev --transpile-only src/jobs/seedAdmin.ts",
+    "calibrate:thresholds": "ts-node-dev --transpile-only src/jobs/calibrateThresholds.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.637.0",
+    "@aws-sdk/s3-request-presigner": "^3.637.0",
+    "axios": "^1.7.7",
+    "bcrypt": "^5.1.1",
+    "bullmq": "^5.12.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "firebase-admin": "^12.4.0",
+    "helmet": "^7.1.0",
+    "ioredis": "^5.4.1",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.6.0",
+    "openai": "^4.56.0",
+    "sharp": "^0.33.5",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^5.0.2",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.6",
+    "@types/node": "^20.14.0",
+    "@typescript-eslint/eslint-plugin": "^8.3.0",
+    "@typescript-eslint/parser": "^8.3.0",
+    "eslint": "^8.57.0",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.5.4"
+  }
+}
