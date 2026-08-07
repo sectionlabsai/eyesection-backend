@@ -96,10 +96,3 @@ export async function me(req: Request, res: Response): Promise<void> {
   const user = await authService.getMe(req.userId);
   res.status(200).json({ user });
 }
-
-
-
-
-
-
-e
