@@ -67,10 +67,10 @@ const schema = z.object({
   // 'gpt-5.6-terra' / 'gpt-5.6-luna' if scans go high-volume and cost-sensitive.
   OPENAI_MODEL: z.string().default('gpt-5.6-sol'),
   // Text-only model for the routine "tips" generator and the AI chat (EB-13).
-  // These paths need no vision acuity, so they run on 'gpt-5' — a solid
-  // general model that still supports Structured Outputs — instead of the
-  // pricier vision flagship above.
-  OPENAI_TEXT_MODEL: z.string().default('gpt-5'),
+  // These paths need no vision acuity; 'gpt-5.6-luna' is the cost-efficient
+  // GPT-5.6 tier (supports Structured Outputs / Chat Completions) — much
+  // cheaper than the vision flagship above for high-volume chat turns.
+  OPENAI_TEXT_MODEL: z.string().default('gpt-5.6-luna'),
   // Optional ascending "a,b,c" cutoff overrides for the code-measured LAB metrics
   // (EB-05/EB-14); produced by `npm run calibrate:thresholds`.
   DARK_CIRCLE_THRESHOLDS: z.string().optional(),
