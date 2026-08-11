@@ -32,12 +32,14 @@ router.delete('/users/:id', requireSuperadmin, asyncHandler(admin.deleteUser));
 router.get('/scans', asyncHandler(admin.listScans));
 router.get('/scans/:id', asyncHandler(admin.getScan));
 router.post('/scans/:id/reprocess', asyncHandler(admin.reprocessScan));
-router.delete('/scans/:id/photos', asyncHandler(admin.deleteScanPhotos));
+// Irreversible photo deletion — superadmin only.
+router.delete('/scans/:id/photos', requireSuperadmin, asyncHandler(admin.deleteScanPhotos));
 
 // Storage
 router.get('/storage/stats', asyncHandler(admin.storageStats));
 router.get('/storage/pending-deletion', asyncHandler(admin.pendingDeletion));
-router.post('/storage/purge-expired', asyncHandler(admin.purgeExpired));
+// Bulk irreversible storage purge — superadmin only.
+router.post('/storage/purge-expired', requireSuperadmin, asyncHandler(admin.purgeExpired));
 
 // Subscriptions
 router.get('/subscriptions', asyncHandler(admin.listSubscriptions));
@@ -50,12 +52,14 @@ router.patch('/exercises/:id', asyncHandler(admin.updateExercise));
 
 // GDPR, notifications & health
 router.get('/gdpr/requests', asyncHandler(admin.gdprRequests));
-router.post('/notifications/send', asyncHandler(admin.sendNotification));
+// Mass push to the user base — superadmin only.
+router.post('/notifications/send', requireSuperadmin, asyncHandler(admin.sendNotification));
 router.post('/notifications/estimate', asyncHandler(admin.estimateAudience));
 router.get('/notifications/history', asyncHandler(admin.notificationHistory));
 router.get('/system/health', asyncHandler(admin.systemHealth));
 router.get('/system/jobs', asyncHandler(admin.listJobs));
-router.post('/system/jobs/retry-all', asyncHandler(admin.retryAllJobs));
+// Bulk requeue of every failed job — superadmin only.
+router.post('/system/jobs/retry-all', requireSuperadmin, asyncHandler(admin.retryAllJobs));
 router.post('/system/jobs/:id/retry', asyncHandler(admin.retryJob));
 
 export default router;

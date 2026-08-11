@@ -139,6 +139,39 @@ if (env.NODE_ENV === 'production' && env.ADMIN_JWT_SECRET === DEV_ADMIN_SECRET) 
   process.exit(1);
 }
 
+// Minimum-strength gate for the JWT signing secrets. The Zod schema only checks
+// they're non-empty (so early dev can boot), but a short/guessable HMAC secret
+// makes tokens forgeable — so in production we hard-fail on weak or reused
+// secrets. Outside production we warn, to keep the failure visible without
+// blocking local work.
+const MIN_SECRET_LEN = 32;
+{
+  const weak: string[] = [];
+  if (env.JWT_SECRET.length < MIN_SECRET_LEN) weak.push('JWT_SECRET');
+  if (env.JWT_REFRESH_SECRET.length < MIN_SECRET_LEN) weak.push('JWT_REFRESH_SECRET');
+  if (env.ADMIN_JWT_SECRET.length < MIN_SECRET_LEN) weak.push('ADMIN_JWT_SECRET');
+
+  // Reusing one secret for both access and refresh tokens collapses the
+  // secret/type separation the two-secret design relies on.
+  const reused = env.JWT_SECRET === env.JWT_REFRESH_SECRET;
+
+  if (weak.length > 0 || reused) {
+    const problems = [
+      weak.length > 0 ? `must be at least ${MIN_SECRET_LEN} chars: ${weak.join(', ')}` : '',
+      reused ? 'JWT_SECRET and JWT_REFRESH_SECRET must differ' : '',
+    ]
+      .filter(Boolean)
+      .join('; ');
+    if (env.NODE_ENV === 'production') {
+      // eslint-disable-next-line no-console
+      console.error(`\n❌ Weak JWT secret configuration — ${problems}.\n`);
+      process.exit(1);
+    }
+    // eslint-disable-next-line no-console
+    console.warn(`⚠️  Weak JWT secret configuration — ${problems}. Required in production.`);
+  }
+}
+
 // Warn (don't crash) in production if the datastore connection strings don't use
 // an encrypted scheme. We only warn — some secure transports are legitimately
 // non-TLS (e.g. Railway's private IPv6 network uses redis://), so hard-failing

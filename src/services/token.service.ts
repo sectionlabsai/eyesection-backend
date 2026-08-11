@@ -7,6 +7,11 @@ const ACCESS_TTL = '15m';
 const REFRESH_TTL = '30d';
 const REVOKE_TTL_SEC = 30 * 24 * 60 * 60; // matches the refresh-token lifetime
 
+// Pin the signing/verification algorithm. Without an explicit allowlist,
+// jwt.verify accepts any algorithm the token's header claims — the classic
+// alg-confusion foothold. We sign HS256 and verify HS256 only.
+const JWT_ALG = 'HS256' as const;
+
 export interface AccessPayload {
   sub: string; // user id
   type: 'access';
@@ -19,12 +24,14 @@ export interface RefreshPayload {
 export function signAccessToken(userId: string): string {
   return jwt.sign({ sub: userId, type: 'access' }, env.JWT_SECRET, {
     expiresIn: ACCESS_TTL,
+    algorithm: JWT_ALG,
   });
 }
 
 export function signRefreshToken(userId: string): string {
   return jwt.sign({ sub: userId, type: 'refresh' }, env.JWT_REFRESH_SECRET, {
     expiresIn: REFRESH_TTL,
+    algorithm: JWT_ALG,
   });
 }
 
@@ -37,7 +44,7 @@ export function issueTokens(userId: string): { accessToken: string; refreshToken
 
 export function verifyAccessToken(token: string): AccessPayload {
   try {
-    const decoded = jwt.verify(token, env.JWT_SECRET) as AccessPayload;
+    const decoded = jwt.verify(token, env.JWT_SECRET, { algorithms: [JWT_ALG] }) as AccessPayload;
     if (decoded.type !== 'access') throw new Error('wrong token type');
     return decoded;
   } catch {
@@ -64,7 +71,7 @@ export async function isUserRevoked(userId: string): Promise<boolean> {
 
 export function verifyRefreshToken(token: string): RefreshPayload {
   try {
-    const decoded = jwt.verify(token, env.JWT_REFRESH_SECRET) as RefreshPayload;
+    const decoded = jwt.verify(token, env.JWT_REFRESH_SECRET, { algorithms: [JWT_ALG] }) as RefreshPayload;
     if (decoded.type !== 'refresh') throw new Error('wrong token type');
     return decoded;
   } catch {

@@ -15,6 +15,9 @@ declare global {
 }
 
 const ADMIN_TTL = '12h';
+// Pin the algorithm so verification can't be tricked into accepting a token
+// signed with a different (or 'none') algorithm — see token.service.
+const ADMIN_JWT_ALG = 'HS256' as const;
 
 interface AdminPayload {
   sub: string;
@@ -26,12 +29,15 @@ interface AdminPayload {
 export function signAdminToken(adminId: string, role: AdminRole): string {
   return jwt.sign({ sub: adminId, role, type: 'admin' }, env.ADMIN_JWT_SECRET, {
     expiresIn: ADMIN_TTL,
+    algorithm: ADMIN_JWT_ALG,
   });
 }
 
 function verifyAdminToken(token: string): AdminPayload {
   try {
-    const decoded = jwt.verify(token, env.ADMIN_JWT_SECRET) as AdminPayload;
+    const decoded = jwt.verify(token, env.ADMIN_JWT_SECRET, {
+      algorithms: [ADMIN_JWT_ALG],
+    }) as AdminPayload;
     if (decoded.type !== 'admin') throw new Error('wrong token type');
     return decoded;
   } catch {

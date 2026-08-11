@@ -6,6 +6,13 @@ const THUMB_MAX_PX = 800;
 const THUMB_QUALITY = 80;
 const EYE_THUMB_MAX_PX = 640;
 
+// Upper bound on decoded pixels. A small (<12mb) but highly-compressed PNG can
+// still decode to billions of pixels (a "decompression bomb") and exhaust memory.
+// 100 MP comfortably covers any real phone camera (flagships top out ~50–108 MP
+// but not at eye-photo aspect) while blocking pathological inputs. Passed to
+// sharp on every decode path AND checked up front from cheap metadata.
+const MAX_INPUT_PIXELS = 100_000_000;
+
 export interface ProcessedImage {
   raw: Buffer; // auto-oriented, EXIF stripped, re-encoded JPEG
   thumb: Buffer; // <=800px, quality 80, EXIF stripped
@@ -28,7 +35,8 @@ export async function processEyeImage(input: Buffer): Promise<ProcessedImage> {
 
   // failOn: 'none' tolerates recoverable defects (truncated/slightly-corrupt
   // JPEGs from phone cameras) instead of throwing — matches browser/native decoders.
-  const opts: sharp.SharpOptions = { failOn: 'none' };
+  // limitInputPixels caps decoded dimensions (decompression-bomb guard).
+  const opts: sharp.SharpOptions = { failOn: 'none', limitInputPixels: MAX_INPUT_PIXELS };
 
   let meta: sharp.Metadata;
   try {
@@ -39,6 +47,12 @@ export async function processEyeImage(input: Buffer): Promise<ProcessedImage> {
 
   if (meta.format !== 'jpeg' && meta.format !== 'png') {
     throw new AppError(415, 'Please use a JPEG or PNG photo', 'IMAGE_UNSUPPORTED');
+  }
+
+  // metadata() reads dimensions without decoding pixels, so reject an oversized
+  // image here with a clear error before any full decode is attempted.
+  if ((meta.width ?? 0) * (meta.height ?? 0) > MAX_INPUT_PIXELS) {
+    throw new AppError(413, 'That photo is too large (too many pixels)', 'IMAGE_TOO_LARGE');
   }
 
   // metadata() doesn't decode pixels, so decode errors surface here. Catch them
@@ -66,7 +80,7 @@ export async function processEyeImage(input: Buffer): Promise<ProcessedImage> {
  */
 export async function makeDisplayThumb(input: Buffer): Promise<Buffer | null> {
   try {
-    return await sharp(input, { failOn: 'none' })
+    return await sharp(input, { failOn: 'none', limitInputPixels: MAX_INPUT_PIXELS })
       .resize({
         width: EYE_THUMB_MAX_PX,
         height: EYE_THUMB_MAX_PX,

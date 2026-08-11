@@ -50,7 +50,9 @@ export async function extractEyeRegionJpeg(
   if (!rect) return null;
 
   try {
-    const image = sharp(imageBuffer);
+    // limitInputPixels guards against a decompression-bomb buffer even though
+    // this path normally receives our own already-processed photo.
+    const image = sharp(imageBuffer, { limitInputPixels: 100_000_000 });
     const meta = await image.metadata();
     const width = meta.width ?? 0;
     const height = meta.height ?? 0;

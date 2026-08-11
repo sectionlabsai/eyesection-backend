@@ -48,7 +48,7 @@ export async function needsAttention(_req: Request, res: Response): Promise<void
 /* ------------------------------- Users --------------------------------- */
 
 const listUsersQuery = pageQuery.extend({
-  search: z.string().trim().min(1).optional(),
+  search: z.string().trim().min(1).max(100).optional(),
   plan: z.string().trim().min(1).optional(),
 });
 

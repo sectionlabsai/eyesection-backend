@@ -11,7 +11,11 @@
  * It measures the front-door capacity: can the server accept a burst of N
  * concurrent uploads, and what is the latency/throughput curve.
  *
- * Run:  npx ts-node --transpile-only src/loadtest/scan-loadtest.ts
+ * Run:  npx ts-node --transpile-only loadtest/scan-loadtest.ts
+ *
+ * NOTE: this dev-only harness lives OUTSIDE src/ so it isn't compiled into the
+ * shipped build, typechecked, or linted with the app. It reaches into ../src/*
+ * to exercise the real scan route/service.
  */
 
 /* eslint-disable no-console */
@@ -38,7 +42,7 @@ import sharp from 'sharp';
 // scan.service calls these via the module namespace at call time, so replacing
 // the exports before the first request takes effect everywhere.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const s3 = require('../services/s3.service');
+const s3 = require('../src/services/s3.service');
 const memStore = new Map<string, Buffer>();
 let s3Puts = 0;
 s3.uploadBuffer = async (key: string, buf: Buffer): Promise<void> => {
@@ -54,17 +58,17 @@ s3.deleteMany = async (keys: string[]): Promise<void> => {
 
 // --- 3. Now pull in the real app pieces. -------------------------------------
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { connectDB, disconnectDB } = require('../config/db');
+const { connectDB, disconnectDB } = require('../src/config/db');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { closeRedis } = require('../config/redis');
+const { closeRedis } = require('../src/config/redis');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { getAnalyzeQueue } = require('../config/queue');
+const { getAnalyzeQueue } = require('../src/config/queue');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const scanRoutes = require('../routes/scan.routes').default;
+const scanRoutes = require('../src/routes/scan.routes').default;
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { requestId } = require('../middleware/requestId');
+const { requestId } = require('../src/middleware/requestId');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { errorHandler, notFoundHandler } = require('../middleware/error');
+const { errorHandler, notFoundHandler } = require('../src/middleware/error');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const mongoose = require('mongoose');
 

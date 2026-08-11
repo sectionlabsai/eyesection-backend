@@ -18,6 +18,7 @@ import { enqueueBroadcast } from '../config/broadcastQueue';
 import { runRetentionSweep } from '../jobs/retention.job';
 import { deleteAccount } from './gdpr.service';
 import { refreshFromRevenueCat } from './subscription.service';
+import { escapeRegex } from '../utils/regex';
 import * as notifications from './notification.service';
 import { Segment } from './notification.service';
 import { revokeUserTokens } from './token.service';
@@ -291,7 +292,9 @@ export async function listUsers(opts: {
   limit: number;
 }): Promise<Paginated<Record<string, unknown>>> {
   const query: Record<string, unknown> = {};
-  if (opts.search) query.email = { $regex: opts.search, $options: 'i' };
+  // Escape the admin-supplied term so its regex metacharacters are treated as
+  // literals — prevents regex injection and keeps matching linear (no ReDoS).
+  if (opts.search) query.email = { $regex: escapeRegex(opts.search), $options: 'i' };
   if (opts.plan) query['subscription.status'] = opts.plan;
 
   const [total, users] = await Promise.all([
