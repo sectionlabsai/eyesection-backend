@@ -37,10 +37,6 @@ const upgradeSchema = z.discriminatedUnion('method', [
 
 const refreshSchema = z.object({ refreshToken: z.string().min(1) });
 const forgotSchema = z.object({ email: z.string().email() });
-const resetSchema = z.object({
-  token: z.string().min(1),
-  password: z.string().min(8, 'Password must be at least 8 characters'),
-});
 
 export async function register(req: Request, res: Response): Promise<void> {
   const { email, password, displayName, timezone } = registerSchema.parse(req.body);
@@ -81,14 +77,9 @@ export async function refresh(req: Request, res: Response): Promise<void> {
 export async function forgotPassword(req: Request, res: Response): Promise<void> {
   const { email } = forgotSchema.parse(req.body);
   await authService.forgotPassword(email);
-  // Always success — never reveals whether the email exists.
+  // Always success — never reveals whether the email exists. The client sends
+  // the actual reset email via Firebase once this resolves.
   res.status(200).json({ message: 'If that email exists, a reset link has been sent.' });
-}
-
-export async function resetPassword(req: Request, res: Response): Promise<void> {
-  const { token, password } = resetSchema.parse(req.body);
-  await authService.resetPassword(token, password);
-  res.status(200).json({ message: 'Your password has been updated.' });
 }
 
 export async function me(req: Request, res: Response): Promise<void> {

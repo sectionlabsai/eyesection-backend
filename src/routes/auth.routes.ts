@@ -15,8 +15,10 @@ router.post('/social', asyncHandler(authController.social));
 router.post('/anonymous', asyncHandler(authController.anonymous));
 router.post('/upgrade', requireAuth, asyncHandler(authController.upgrade));
 router.post('/refresh', asyncHandler(authController.refresh));
+// Ensures a Firebase account exists for the email (esp. legacy bcrypt users);
+// the client then triggers Firebase's own sendPasswordResetEmail. There is no
+// server-side reset-password endpoint — Firebase owns the password change.
 router.post('/forgot-password', asyncHandler(authController.forgotPassword));
-router.post('/reset-password', asyncHandler(authController.resetPassword));
 router.get('/me', requireAuth, asyncHandler(authController.me));
 
 export default router;

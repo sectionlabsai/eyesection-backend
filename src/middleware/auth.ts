@@ -1,6 +1,7 @@
 import { NextFunction, Request, Response } from 'express';
 import { AppError } from './error';
-import { verifyAccessToken } from '../services/token.service';
+import { verifyAccessToken, isUserRevoked } from '../services/token.service';
+import { logger } from '../utils/logger';
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
@@ -19,13 +20,38 @@ function extractBearer(req: Request): string | null {
   return token;
 }
 
-/** Rejects unless a valid access token is present; attaches req.userId. */
-export function requireAuth(req: Request, _res: Response, next: NextFunction): void {
-  const token = extractBearer(req);
-  if (!token) throw new AppError(401, 'Authentication required', 'UNAUTHENTICATED');
-  const payload = verifyAccessToken(token);
-  req.userId = payload.sub;
-  next();
+/**
+ * Rejects unless a valid access token is present; attaches req.userId.
+ *
+ * Also consults the revocation blocklist so a suspended / GDPR-deleted user's
+ * still-valid (<=15m) access token stops working immediately, rather than
+ * lingering until natural expiry. The blocklist lookup fails open: if Redis is
+ * unreachable we prefer availability over blocking every authenticated request
+ * (consistent with the rate limiter).
+ */
+export async function requireAuth(req: Request, _res: Response, next: NextFunction): Promise<void> {
+  try {
+    const token = extractBearer(req);
+    if (!token) throw new AppError(401, 'Authentication required', 'UNAUTHENTICATED');
+    const payload = verifyAccessToken(token);
+    if (await isRevokedSafe(payload.sub)) {
+      throw new AppError(401, 'Invalid or expired token', 'INVALID_TOKEN');
+    }
+    req.userId = payload.sub;
+    next();
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** Revocation lookup that never throws — a Redis outage must not lock everyone out. */
+async function isRevokedSafe(userId: string): Promise<boolean> {
+  try {
+    return await isUserRevoked(userId);
+  } catch (err) {
+    logger.warn('requireAuth: revocation check failed, allowing request', err);
+    return false;
+  }
 }
 
 /**

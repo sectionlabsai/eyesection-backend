@@ -52,18 +52,68 @@ function paginate<T>(data: T[], page: number, total: number, limit: number): Pag
 // unknown-admin path so login timing doesn't reveal whether the email exists.
 const DUMMY_BCRYPT_HASH = '$2b$12$MX16Gjnp1/abrhQREO6sau87hY8XXzG5V6p/MGw8IfFnr9IvSb5wi';
 
+// Per-account lockout for admin login. The 10/min IP rate limit alone doesn't
+// stop a distributed (many-IP) credential-stuffing run against a single admin
+// account, so we also lock the account after too many failures. Fail-open on
+// Redis errors — an outage must not permanently lock admins out.
+const ADMIN_LOGIN_MAX_FAILURES = 5;
+const ADMIN_LOGIN_LOCK_SEC = 15 * 60; // 15 minutes
+
+function adminFailKey(email: string): string {
+  return `admin:login:fail:${email.toLowerCase()}`;
+}
+
+async function isAdminLoginLocked(email: string): Promise<boolean> {
+  try {
+    const raw = await getRedis().get(adminFailKey(email));
+    return raw !== null && parseInt(raw, 10) >= ADMIN_LOGIN_MAX_FAILURES;
+  } catch {
+    return false; // fail open
+  }
+}
+
+async function recordAdminLoginFailure(email: string): Promise<void> {
+  try {
+    const key = adminFailKey(email);
+    await getRedis().incr(key);
+    // Sliding window: each failure re-arms the 15-minute expiry.
+    await getRedis().expire(key, ADMIN_LOGIN_LOCK_SEC);
+  } catch {
+    // fail open — don't let a Redis blip block a legitimate login attempt
+  }
+}
+
+async function clearAdminLoginFailures(email: string): Promise<void> {
+  try {
+    await getRedis().del(adminFailKey(email));
+  } catch {
+    // best effort
+  }
+}
+
 export async function login(
   email: string,
   password: string,
 ): Promise<{ adminToken: string; admin: Record<string, unknown> }> {
+  // When locked, return the SAME generic error as a bad password — never reveal
+  // the lock, or an attacker learns which accounts they've successfully tripped.
+  if (await isAdminLoginLocked(email)) {
+    throw new AppError(401, 'Invalid credentials', 'ADMIN_INVALID_CREDENTIALS');
+  }
+
   const admin = await AdminUser.findOne({ email: email.toLowerCase() }).select('+passwordHash');
   if (!admin) {
     await bcrypt.compare(password, DUMMY_BCRYPT_HASH);
+    await recordAdminLoginFailure(email);
     throw new AppError(401, 'Invalid credentials', 'ADMIN_INVALID_CREDENTIALS');
   }
   const ok = await bcrypt.compare(password, admin.passwordHash);
-  if (!ok) throw new AppError(401, 'Invalid credentials', 'ADMIN_INVALID_CREDENTIALS');
+  if (!ok) {
+    await recordAdminLoginFailure(email);
+    throw new AppError(401, 'Invalid credentials', 'ADMIN_INVALID_CREDENTIALS');
+  }
 
+  await clearAdminLoginFailures(email);
   admin.lastLoginAt = new Date();
   await admin.save();
 

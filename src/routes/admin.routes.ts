@@ -2,11 +2,14 @@ import { Router } from 'express';
 import * as admin from '../controllers/admin.controller';
 import { asyncHandler } from '../utils/asyncHandler';
 import { requireAdmin, requireSuperadmin } from '../middleware/adminAuth';
+import { authRateLimit } from '../middleware/rateLimit';
 
 const router = Router();
 
-// Public admin auth.
-router.post('/auth/login', asyncHandler(admin.login));
+// Public admin auth. The strict 10/min/IP limiter (not the 100/min default the
+// router is otherwise mounted with) throttles credential brute-forcing; the
+// service layer adds per-account lockout on top.
+router.post('/auth/login', authRateLimit, asyncHandler(admin.login));
 
 // Everything below requires a valid admin token.
 router.use(requireAdmin);

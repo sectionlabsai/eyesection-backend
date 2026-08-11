@@ -1,11 +1,8 @@
 import bcrypt from 'bcrypt';
-import jwt from 'jsonwebtoken';
 import { User, IUser } from '../models/User';
 import { AppError } from '../middleware/error';
-import { env } from '../config/env';
 import { issueTokens, verifyRefreshToken, isUserRevoked } from './token.service';
-import { verifyFirebaseIdToken } from '../config/firebase';
-import { logger } from '../utils/logger';
+import { verifyFirebaseIdToken, ensureFirebaseUserForReset } from '../config/firebase';
 
 const BCRYPT_ROUNDS = 12;
 
@@ -144,11 +141,27 @@ export async function login(email: string, password: string): Promise<AuthResult
   const ok = await bcrypt.compare(password, user.passwordHash);
   if (!ok) throw new AppError(401, 'Invalid email or password', 'INVALID_CREDENTIALS');
 
+  await assertAccountActive(user);
+
   user.lastActiveAt = new Date();
   await user.save();
 
   const tokens = issueTokens(user._id.toString());
   return { ...tokens, user: sanitizeUser(user) };
+}
+
+/**
+ * Enforce suspension / revocation at sign-in. Without this a suspended (or
+ * admin-revoked) user could simply log in again for a fresh token pair — the
+ * blocklist and status were previously only consulted in refresh(). Runs only
+ * for an already-existing account (a just-created social user is never
+ * suspended). Reveals suspension explicitly: the credentials are valid, so
+ * there is no enumeration concern, and the user needs to know why.
+ */
+async function assertAccountActive(user: IUser): Promise<void> {
+  if (user.status === 'suspended' || (await isUserRevoked(user._id.toString()))) {
+    throw new AppError(403, 'This account has been suspended', 'ACCOUNT_SUSPENDED');
+  }
 }
 
 export async function socialLogin(
@@ -174,6 +187,9 @@ export async function socialLogin(
     });
     user.subscription.rcAppUserId = user._id.toString();
   } else {
+    // Existing account — enforce suspension/revocation before re-issuing tokens,
+    // otherwise a suspended user could sign back in via Firebase for fresh tokens.
+    await assertAccountActive(user);
     // Link the firebase uid / provider on first social sign-in for an existing account.
     user.firebaseUid = identity.firebaseUid;
     user.authProvider = provider;
@@ -202,33 +218,31 @@ export async function refresh(refreshToken: string): Promise<{ accessToken: stri
 }
 
 /**
- * Token-based password reset stub. Always returns success (never reveals whether
- * the email exists). Real email delivery is wired up later; for now the reset
- * link is logged server-side.
+ * Prepare a Firebase password-reset for `email`, then let the client trigger the
+ * actual send (Firebase owns email/password identity and email delivery now).
+ *
+ * The only server-side work is guaranteeing a Firebase Auth account exists:
+ * legacy users created before the Firebase migration live only as a bcrypt hash
+ * in Mongo, so `sendPasswordResetEmail` would have nothing to send to. We
+ * provision the missing Firebase user (preserving their password via bcrypt
+ * import) and record its uid for future sign-ins.
+ *
+ * Always resolves — never reveals whether the email exists (no enumeration).
  */
 export async function forgotPassword(email: string): Promise<void> {
-  const user = await User.findOne({ email: email.toLowerCase() });
+  const normalized = email.toLowerCase();
+  const user = await User.findOne({ email: normalized }).select('+passwordHash');
   if (!user) return; // silent — do not leak existence
-  const resetToken = jwt.sign(
-    { sub: user._id.toString(), type: 'reset' },
-    env.JWT_SECRET,
-    { expiresIn: '30m' },
-  );
-  logger.info(`[password-reset] token for ${user.email}: ${resetToken}`);
-}
 
-export async function resetPassword(resetToken: string, newPassword: string): Promise<void> {
-  let sub: string;
-  try {
-    const decoded = jwt.verify(resetToken, env.JWT_SECRET) as { sub: string; type: string };
-    if (decoded.type !== 'reset') throw new Error('wrong token type');
-    sub = decoded.sub;
-  } catch {
-    throw new AppError(400, 'This reset link is invalid or has expired', 'INVALID_RESET_TOKEN');
-  }
-  const user = await User.findById(sub);
-  if (!user) throw new AppError(400, 'This reset link is invalid or has expired', 'INVALID_RESET_TOKEN');
-  user.passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+  // Already a Firebase-native account (social sign-in, or an email user who has
+  // logged in since the migration): the client's reset email will reach it.
+  if (user.firebaseUid) return;
+
+  const firebaseUid = await ensureFirebaseUserForReset(normalized, {
+    uid: user._id.toString(),
+    bcryptHash: user.passwordHash,
+  });
+  user.firebaseUid = firebaseUid;
   await user.save();
 }
 
