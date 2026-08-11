@@ -1,5 +1,6 @@
 export { User } from './User';
 export { EyeScan } from './EyeScan';
+export { ChatSession } from './ChatSession';
 export { ComfortEntry } from './ComfortEntry';
 export { BreakPlan } from './BreakPlan';
 export { ExerciseSession } from './ExerciseSession';
@@ -11,6 +12,7 @@ export { AdminNotificationLog } from './AdminNotificationLog';
 
 export type { IUser } from './User';
 export type { IEyeScan } from './EyeScan';
+export type { IChatSession, IChatSessionMessage } from './ChatSession';
 export type { IComfortEntry } from './ComfortEntry';
 export type { IBreakPlan } from './BreakPlan';
 export type { IExerciseSession } from './ExerciseSession';

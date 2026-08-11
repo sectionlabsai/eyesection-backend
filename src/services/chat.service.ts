@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { Types } from 'mongoose';
 import { z } from 'zod';
 import { env } from '../config/env';
 import { logger } from '../utils/logger';
@@ -8,6 +9,7 @@ import {
   Exercise,
   ComfortEntry,
   ExerciseSession,
+  ChatSession,
   User,
 } from '../models';
 import { getStreak } from './coach.service';
@@ -121,6 +123,9 @@ export interface ChatMessage {
 export interface ChatInput {
   userId: string;
   messages: ChatMessage[];
+  // Thread this turn belongs to. Omitted for a fresh chat — a new session is
+  // created and its id is returned so the client can continue the thread.
+  sessionId?: string;
 }
 
 export interface ChatQuota {
@@ -134,7 +139,16 @@ export interface ChatReply {
   inScope: boolean;
   followups: string[];
   quota: ChatQuota;
+  // Present once a turn has been persisted; the client stores it to keep
+  // appending to the same thread and to refresh the "recent history" list.
+  sessionId?: string;
 }
+
+// Bound the stored thread so a single document stays small. Chat is daily-quota
+// limited, so this is generous — old turns beyond it are dropped from storage.
+const MAX_STORED_MESSAGES = 200;
+// Derived thread title: the first user message, trimmed to a short label.
+const TITLE_MAX_CHARS = 80;
 
 let client: OpenAI | null = null;
 function getClient(): OpenAI | null {
@@ -329,6 +343,115 @@ async function computeUserContext(userId: string): Promise<string> {
   return lines.length ? `\nContext for this user:\n${lines.join('\n')}\n` : '';
 }
 
+export interface ChatSessionSummary {
+  id: string;
+  title: string;
+  lastMessageAt: Date;
+  preview: string;
+}
+
+export interface ChatSessionDetail {
+  id: string;
+  title: string;
+  messages: Array<{ role: 'user' | 'assistant'; content: string; at: Date }>;
+}
+
+/**
+ * Append a delivered turn (the user's message + the assistant's reply) to its
+ * thread, creating the thread on the first turn. Best-effort: a persistence
+ * failure must never fail the chat, so callers swallow errors — the turn is
+ * simply not saved to history. Returns the thread id when it was persisted.
+ */
+async function recordChatTurn(
+  userId: string,
+  sessionId: string | undefined,
+  userMessage: string,
+  assistantReply: string,
+): Promise<string | undefined> {
+  const now = new Date();
+  const turns = [
+    { role: 'user' as const, content: userMessage, at: now },
+    { role: 'assistant' as const, content: assistantReply, at: now },
+  ];
+
+  // Resume an existing thread the caller owns; ignore a stale/foreign id and
+  // start a fresh thread instead of failing.
+  if (sessionId && Types.ObjectId.isValid(sessionId)) {
+    const existing = await ChatSession.findOne({ _id: sessionId, userId });
+    if (existing) {
+      existing.messages.push(...turns);
+      if (existing.messages.length > MAX_STORED_MESSAGES) {
+        existing.messages = existing.messages.slice(-MAX_STORED_MESSAGES);
+      }
+      existing.lastMessageAt = now;
+      await existing.save();
+      return existing._id.toString();
+    }
+  }
+
+  const created = await ChatSession.create({
+    userId,
+    title: sanitizeForPrompt(userMessage, TITLE_MAX_CHARS) || 'New chat',
+    messages: turns,
+    lastMessageAt: now,
+  });
+  return created._id.toString();
+}
+
+/** Recent conversations for the history list, newest first. */
+export async function listChatSessions(
+  userId: string,
+  limit = 30,
+): Promise<ChatSessionSummary[]> {
+  const sessions = await ChatSession.find({ userId })
+    .sort({ lastMessageAt: -1 })
+    .limit(Math.min(Math.max(limit, 1), 100))
+    .select('title messages lastMessageAt')
+    .lean();
+
+  return sessions.map((s) => {
+    const last = s.messages[s.messages.length - 1];
+    return {
+      id: s._id.toString(),
+      title: s.title,
+      lastMessageAt: s.lastMessageAt,
+      preview: last ? last.content.slice(0, 140) : '',
+    };
+  });
+}
+
+/** Full thread for resuming a conversation. Throws 404 if not owned/found. */
+export async function getChatSession(
+  userId: string,
+  sessionId: string,
+): Promise<ChatSessionDetail> {
+  if (!Types.ObjectId.isValid(sessionId)) {
+    throw new AppError(404, 'Conversation not found', 'CHAT_SESSION_NOT_FOUND');
+  }
+  const session = await ChatSession.findOne({ _id: sessionId, userId })
+    .select('title messages')
+    .lean();
+  if (!session) {
+    throw new AppError(404, 'Conversation not found', 'CHAT_SESSION_NOT_FOUND');
+  }
+  return {
+    id: session._id.toString(),
+    title: session.title,
+    messages: session.messages.map((m) => ({ role: m.role, content: m.content, at: m.at })),
+  };
+}
+
+/** Delete a conversation. Idempotent — a missing/foreign id is a no-op 404. */
+export async function deleteChatSession(userId: string, sessionId: string): Promise<void> {
+  if (!Types.ObjectId.isValid(sessionId)) {
+    throw new AppError(404, 'Conversation not found', 'CHAT_SESSION_NOT_FOUND');
+  }
+  const res = await ChatSession.deleteOne({ _id: sessionId, userId });
+  if (res.deletedCount === 0) {
+    throw new AppError(404, 'Conversation not found', 'CHAT_SESSION_NOT_FOUND');
+  }
+}
+
 /**
  * Neutralize the client-supplied conversation before it reaches the model:
  * strip control chars / collapse whitespace on every turn (so no message can
@@ -381,6 +504,7 @@ export async function chat(input: ChatInput): Promise<ChatReply> {
         'Which exercises are good for screen breaks?',
       ],
       quota: unconsumed,
+      sessionId: input.sessionId,
     };
   }
 
@@ -405,15 +529,22 @@ export async function chat(input: ChatInput): Promise<ChatReply> {
         remaining: Math.max(0, limit - (newUsed || used + 1)),
       };
       // Belt-and-braces: if the model flagged out-of-scope, force the fixed line.
-      if (!parsed.data.in_scope && !parsed.data.reply.trim()) {
-        return { reply: MEDICAL_REDIRECT, inScope: false, followups: [], quota };
+      const forcedRedirect = !parsed.data.in_scope && !parsed.data.reply.trim();
+      const replyText = forcedRedirect ? MEDICAL_REDIRECT : parsed.data.reply;
+      const inScope = forcedRedirect ? false : parsed.data.in_scope;
+      const followups = forcedRedirect ? [] : parsed.data.followups;
+
+      // Persist the delivered turn to its thread (best-effort — a storage blip
+      // must never fail the chat). The trailing message is the user's.
+      const userMessage = history[history.length - 1].content;
+      let sessionId = input.sessionId;
+      try {
+        sessionId = await recordChatTurn(input.userId, input.sessionId, userMessage, replyText);
+      } catch (err) {
+        logger.warn('Chat history persist failed — turn not saved', err);
       }
-      return {
-        reply: parsed.data.reply,
-        inScope: parsed.data.in_scope,
-        followups: parsed.data.followups,
-        quota,
-      };
+
+      return { reply: replyText, inScope, followups, quota, sessionId };
     }
     if (parsed) {
       logger.warn('Chat reply failed validation', parsed.error.issues);
@@ -430,5 +561,6 @@ export async function chat(input: ChatInput): Promise<ChatReply> {
     inScope: true,
     followups: [],
     quota: unconsumed,
+    sessionId: input.sessionId,
   };
 }

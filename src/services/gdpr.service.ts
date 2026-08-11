@@ -7,6 +7,7 @@ import {
   BreakPlan,
   ExerciseSession,
   Report,
+  ChatSession,
 } from '../models';
 import { AppError } from '../middleware/error';
 import {
@@ -29,13 +30,14 @@ const EXPORT_URL_TTL_SEC = 7 * 24 * 60 * 60; // signed link valid 7 days (S3 max
 export async function gatherUserData(userId: string): Promise<Record<string, unknown>> {
   const uid = new Types.ObjectId(userId);
 
-  const [user, scans, comfort, plan, sessions, reports] = await Promise.all([
+  const [user, scans, comfort, plan, sessions, reports, chatSessions] = await Promise.all([
     User.findById(uid),
     EyeScan.find({ userId: uid }).sort({ createdAt: 1 }),
     ComfortEntry.find({ userId: uid }).sort({ date: 1 }),
     BreakPlan.findOne({ userId: uid }),
     ExerciseSession.find({ userId: uid }).sort({ completedAt: 1 }),
     Report.find({ userId: uid }).sort({ weekStart: 1 }),
+    ChatSession.find({ userId: uid }).sort({ lastMessageAt: 1 }),
   ]);
 
   if (!user) throw new AppError(404, 'User not found', 'USER_NOT_FOUND');
@@ -96,6 +98,12 @@ export async function gatherUserData(userId: string): Promise<Record<string, unk
       comfortAvg: r.comfortAvg,
       breakCompliancePct: r.breakCompliancePct,
       highlights: r.highlights,
+    })),
+    chatSessions: chatSessions.map((c) => ({
+      title: c.title,
+      createdAt: c.createdAt,
+      lastMessageAt: c.lastMessageAt,
+      messages: c.messages.map((m) => ({ role: m.role, content: m.content, at: m.at })),
     })),
   };
 }
@@ -160,6 +168,7 @@ export async function deleteAccount(userId: string): Promise<void> {
     BreakPlan.deleteMany({ userId: uid }),
     ExerciseSession.deleteMany({ userId: uid }),
     Report.deleteMany({ userId: uid }),
+    ChatSession.deleteMany({ userId: uid }),
   ]);
 
   // 3) Revoke sessions, purge Redis chat state, then remove the user doc.
