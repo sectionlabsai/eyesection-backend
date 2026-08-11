@@ -6,17 +6,59 @@ import { processEyeImage } from './image.service';
 import { uploadBuffer, getSignedUrl, scanKey, deleteMany } from './s3.service';
 import { enqueueAnalyzeScan } from '../config/queue';
 import { isPremium } from './entitlement.service';
+import { getRedis } from '../config/redis';
+import { env } from '../config/env';
 import { logger } from '../utils/logger';
 
 /** Guests and free accounts get exactly one successful/in-flight scan. */
 const FREE_SCAN_LIMIT = 1;
 
+/** Rolling window for the per-IP anonymous scan cap. */
+const ANON_SCAN_WINDOW_SEC = 24 * 60 * 60;
+
+/**
+ * Cap UNAUTHENTICATED uploads per client IP over a rolling 24h. Each scan fans
+ * out to several OpenAI vision calls, so without this an anonymous caller could
+ * drive large cost, throttled only by the coarse per-minute IP rate limit.
+ * Fails open on a Redis blip (the per-route rate limit is the backstop) but
+ * hard-blocks when the limit is explicitly set to 0.
+ */
+async function assertAnonScanAllowance(anonId?: string): Promise<void> {
+  const limit = env.ANON_SCAN_DAILY_LIMIT;
+  if (limit <= 0) {
+    throw new AppError(
+      402,
+      'Please create an account to run a scan.',
+      'ANON_SCAN_DISABLED',
+    );
+  }
+  if (!anonId) return; // no client IP resolved — rare; rate limit still applies
+
+  try {
+    const redis = getRedis();
+    const key = `scan:anon:${anonId}`;
+    const count = await redis.incr(key);
+    if (count === 1) await redis.expire(key, ANON_SCAN_WINDOW_SEC);
+    if (count > limit) {
+      throw new AppError(
+        402,
+        'You’ve reached the free scan limit. Create an account or upgrade for more.',
+        'ANON_SCAN_LIMIT',
+      );
+    }
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    logger.warn('Anonymous scan allowance check failed — allowing this upload', err);
+  }
+}
+
 /**
  * Non-premium users (anonymous guests + registered free) may create only one
- * non-failed scan. Premium users are unlimited.
+ * non-failed scan. Premium users are unlimited. Truly unauthenticated uploads
+ * fall back to a per-IP daily cap (see assertAnonScanAllowance).
  */
-async function assertFreeScanAllowance(userId?: string): Promise<void> {
-  if (!userId) return; // truly unauthenticated upload — rare; client always auths
+async function assertScanAllowance(userId?: string, anonId?: string): Promise<void> {
+  if (!userId) return assertAnonScanAllowance(anonId);
 
   const user = await User.findById(userId).select('subscription');
   if (user && isPremium(user)) return;
@@ -45,6 +87,7 @@ export interface Geometry {
 
 export interface UploadInput {
   userId?: string; // undefined => anonymous first scan
+  anonId?: string; // client IP for the anonymous per-IP scan cap (when no userId)
   front: Buffer;
   closeup?: Buffer;
   geometry: Geometry;
@@ -97,8 +140,9 @@ export async function createScanFromUpload(input: UploadInput): Promise<{
 }> {
   assertGeometryPresent(input.geometry);
   // Enforce before any image work / S3 writes so free-tier users can't burn
-  // bandwidth after they've already spent their one scan.
-  await assertFreeScanAllowance(input.userId);
+  // bandwidth (and anonymous callers can't burn OpenAI cost) after they've
+  // already spent their allowance.
+  await assertScanAllowance(input.userId, input.anonId);
 
   const scanId = new Types.ObjectId();
   const ownerId = input.userId || 'anon';

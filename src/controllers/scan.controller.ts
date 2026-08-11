@@ -18,6 +18,7 @@ export async function upload(req: Request, res: Response): Promise<void> {
 
   const result = await scanService.createScanFromUpload({
     userId: req.userId, // optionalAuth — may be undefined (anonymous first scan)
+    anonId: req.ip, // per-IP cap for anonymous uploads (ignored when userId is set)
     front: scanService.decodeBase64Image(front),
     closeup: closeup ? scanService.decodeBase64Image(closeup) : undefined,
     geometry: geometry as scanService.Geometry,

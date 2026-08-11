@@ -16,6 +16,7 @@ import { getRedis } from '../config/redis';
 import { AppError } from '../middleware/error';
 import { localDayKey } from '../utils/day';
 import { CONTEXT_TTL_SEC, contextKey } from './chatCache';
+import { sanitizeForPrompt, sanitizeListForPrompt } from '../utils/prompt';
 
 /**
  * Eye-area chat assistant (EB-13). A plain text-model chat with STRICT cosmetic
@@ -232,17 +233,22 @@ async function computeUserContext(userId: string): Promise<string> {
   const lines: string[] = [];
 
   // --- Onboarding profile ---
+  // Free-text fields (goal, baselineComfort, role, careProducts) are user-supplied
+  // and get sanitized before injection so a stored value can't smuggle prompt
+  // instructions into the context block. See utils/prompt.
   if (user) {
     const p: string[] = [];
-    if (user.goal) p.push(`goal "${user.goal}"`);
-    if (user.baselineComfort) p.push(`baseline comfort "${user.baselineComfort}"`);
+    if (user.goal) p.push(`goal "${sanitizeForPrompt(user.goal, 120)}"`);
+    if (user.baselineComfort)
+      p.push(`baseline comfort "${sanitizeForPrompt(user.baselineComfort, 60)}"`);
     if (user.screenProfile?.dailyScreenHours != null)
       p.push(`~${user.screenProfile.dailyScreenHours}h/day screens`);
-    if (user.screenProfile?.role) p.push(`role ${user.screenProfile.role}`);
+    if (user.screenProfile?.role) p.push(`role ${sanitizeForPrompt(user.screenProfile.role, 60)}`);
     if (user.screenProfile?.nightPhoneUse === true) p.push('uses phone late at night');
     if (user.screenProfile?.wearsGlasses === true) p.push('wears glasses');
-    if (user.careProducts?.length) p.push(`uses: ${user.careProducts.join(', ')}`);
-    if (user.irisColorCategory) p.push(`iris ${user.irisColorCategory}`);
+    if (user.careProducts?.length)
+      p.push(`uses: ${sanitizeListForPrompt(user.careProducts, 60).join(', ')}`);
+    if (user.irisColorCategory) p.push(`iris ${sanitizeForPrompt(user.irisColorCategory, 40)}`);
     if (p.length) lines.push(`Profile: ${p.join('; ')}.`);
   }
 

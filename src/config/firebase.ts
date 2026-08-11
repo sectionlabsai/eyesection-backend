@@ -16,10 +16,17 @@ function loadServiceAccount(): admin.ServiceAccount {
   if (!raw) {
     throw new AppError(503, 'Social login is not available right now', 'AUTH_UNAVAILABLE');
   }
+  const isInlineJson = raw.trim().startsWith('{');
+  if (!isInlineJson && env.NODE_ENV === 'production') {
+    // A service-account key file on disk in production is a footgun (leaks via
+    // image/backup). Prefer injecting the JSON from a secret manager.
+    logger.warn(
+      'FIREBASE_SERVICE_ACCOUNT is a file path in production — prefer injecting ' +
+        'the service-account JSON from a secret manager instead of a file on disk.',
+    );
+  }
   try {
-    const json = raw.trim().startsWith('{')
-      ? JSON.parse(raw)
-      : JSON.parse(fs.readFileSync(raw, 'utf8'));
+    const json = isInlineJson ? JSON.parse(raw) : JSON.parse(fs.readFileSync(raw, 'utf8'));
     return json as admin.ServiceAccount;
   } catch (err) {
     logger.error('Failed to load FIREBASE_SERVICE_ACCOUNT', err);

@@ -17,6 +17,35 @@ export const CONTEXT_TTL_SEC = 120;
 export const contextKey = (userId: string) => `chat:ctx:${userId}`;
 
 /**
+ * Purge all Redis state tied to a user (cached context + per-day chat quota
+ * counters). Called from the GDPR account-deletion cascade so nothing user-keyed
+ * lingers in Redis. Both key sets are TTL-bounded, so this FAILS OPEN: a Redis
+ * error is logged, not thrown — the DB cascade must still complete.
+ */
+export async function purgeUserChatData(userId: string): Promise<void> {
+  try {
+    const redis = getRedis();
+    await redis.del(contextKey(userId));
+    // Quota keys are `chat:quota:<userId>:<dayKey>` — one per active local day.
+    // SCAN (non-blocking) + delete this user's matches.
+    let cursor = '0';
+    do {
+      const [next, keys] = await redis.scan(
+        cursor,
+        'MATCH',
+        `chat:quota:${userId}:*`,
+        'COUNT',
+        100,
+      );
+      cursor = next;
+      if (keys.length) await redis.del(...keys);
+    } while (cursor !== '0');
+  } catch (err) {
+    logger.warn('Chat data purge on account deletion failed — TTL will expire it', err);
+  }
+}
+
+/**
  * Drop a user's cached chat context so the next message rebuilds it fresh.
  * Call after an event that changes their data for instant freshness — optional,
  * since the TTL expires it anyway. FAILS OPEN: a Redis error is logged, not thrown.

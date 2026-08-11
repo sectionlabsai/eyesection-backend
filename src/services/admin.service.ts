@@ -48,12 +48,19 @@ function paginate<T>(data: T[], page: number, total: number, limit: number): Pag
 
 /* ------------------------------- Auth ---------------------------------- */
 
+// A valid cost-12 bcrypt hash of a throwaway string, compared against on the
+// unknown-admin path so login timing doesn't reveal whether the email exists.
+const DUMMY_BCRYPT_HASH = '$2b$12$MX16Gjnp1/abrhQREO6sau87hY8XXzG5V6p/MGw8IfFnr9IvSb5wi';
+
 export async function login(
   email: string,
   password: string,
 ): Promise<{ adminToken: string; admin: Record<string, unknown> }> {
   const admin = await AdminUser.findOne({ email: email.toLowerCase() }).select('+passwordHash');
-  if (!admin) throw new AppError(401, 'Invalid credentials', 'ADMIN_INVALID_CREDENTIALS');
+  if (!admin) {
+    await bcrypt.compare(password, DUMMY_BCRYPT_HASH);
+    throw new AppError(401, 'Invalid credentials', 'ADMIN_INVALID_CREDENTIALS');
+  }
   const ok = await bcrypt.compare(password, admin.passwordHash);
   if (!ok) throw new AppError(401, 'Invalid credentials', 'ADMIN_INVALID_CREDENTIALS');
 

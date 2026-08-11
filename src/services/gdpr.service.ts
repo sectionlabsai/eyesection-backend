@@ -16,6 +16,7 @@ import {
   userPrefix,
 } from './s3.service';
 import { revokeUserTokens } from './token.service';
+import { purgeUserChatData } from './chatCache';
 import { logger } from '../utils/logger';
 
 const EXPORT_URL_TTL_SEC = 7 * 24 * 60 * 60; // signed link valid 7 days (S3 max)
@@ -161,10 +162,14 @@ export async function deleteAccount(userId: string): Promise<void> {
     Report.deleteMany({ userId: uid }),
   ]);
 
-  // 3) Revoke sessions and detach billing, then remove the user.
+  // 3) Revoke sessions, purge Redis chat state, then remove the user doc.
   await revokeUserTokens(userId);
-  logger.info(`[gdpr-delete] RevenueCat mapping detached for user ${userId}`);
+  await purgeUserChatData(userId);
   await User.deleteOne({ _id: uid });
 
+  // The user doc — including the local RevenueCat mapping (rcAppUserId) — is now
+  // gone. RevenueCat's own subscriber record is not deleted here; it holds no PII
+  // beyond the app user id and expires per their retention. Wire their delete-
+  // subscriber API here if hard deletion on their side is ever required.
   logger.info(`[gdpr-delete] account ${userId} fully deleted`);
 }

@@ -2,6 +2,7 @@ import OpenAI from 'openai';
 import { z } from 'zod';
 import { env } from '../../config/env';
 import { logger } from '../../utils/logger';
+import { sanitizeForPrompt, sanitizeListForPrompt } from '../../utils/prompt';
 import {
   EyeRoutine,
   RoutineStep,
@@ -220,15 +221,21 @@ function mergeSchedule(
 function profileLines(ctx?: RoutineUserContext): string {
   if (!ctx) return '';
   const lines: string[] = [];
-  if (ctx.goal) lines.push(`- Goal: ${ctx.goal}`);
-  if (ctx.baselineComfort) lines.push(`- Baseline comfort: ${ctx.baselineComfort}`);
+  // goal / baselineComfort / careProducts are user-supplied free text — sanitize
+  // before injection so a stored value can't smuggle prompt instructions.
+  if (ctx.goal) lines.push(`- Goal: ${sanitizeForPrompt(ctx.goal, 120)}`);
+  if (ctx.baselineComfort) {
+    lines.push(`- Baseline comfort: ${sanitizeForPrompt(ctx.baselineComfort, 60)}`);
+  }
   if (ctx.dailyScreenHours != null) {
     lines.push(`- Typical daily screen time: ~${ctx.dailyScreenHours} hours`);
   }
   if (ctx.nightPhoneUse === true) lines.push('- Uses phone late at night');
   if (ctx.nightPhoneUse === false) lines.push('- Avoids late-night phone use');
   if (ctx.careProducts?.length) {
-    lines.push(`- Care products they already use: ${ctx.careProducts.join(', ')}`);
+    lines.push(
+      `- Care products they already use: ${sanitizeListForPrompt(ctx.careProducts, 60).join(', ')}`,
+    );
   }
   if (lines.length === 0) return '';
   return `\nUser profile (personalize the schedule around this):\n${lines.join('\n')}\n`;

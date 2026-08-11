@@ -32,6 +32,19 @@ const schema = z.object({
   // cleanup job purges it via the GDPR cascade.
   ANON_TTL_DAYS: z.coerce.number().int().min(1).default(30),
 
+  // Max eye scans an UNAUTHENTICATED caller may submit per rolling 24h, keyed by
+  // client IP. Each scan fans out to several OpenAI vision calls, so this caps
+  // anonymous cost-abuse. Registered free users are separately limited to one
+  // scan (FREE_SCAN_LIMIT in scan.service). Set 0 to block anonymous scans.
+  ANON_SCAN_DAILY_LIMIT: z.coerce.number().int().min(0).default(3),
+
+  // Express `trust proxy` setting — must match how many reverse proxies sit in
+  // front of the app, or `req.ip` (the rate-limit key) becomes client-spoofable
+  // via X-Forwarded-For. A plain integer is a hop count (e.g. '1' for one proxy);
+  // 'true'/'false' toggle full/no trust; anything else is passed through verbatim
+  // (e.g. a comma-separated subnet list or 'loopback'). See app.ts.
+  TRUST_PROXY: z.string().default('1'),
+
   // Comma-separated allowlist of browser origins permitted for cross-origin
   // requests (e.g. the admin web panel). Native mobile clients send no Origin
   // header and are always allowed. Empty in production => browser CORS is denied.
@@ -107,6 +120,26 @@ if (env.NODE_ENV === 'production' && env.ADMIN_JWT_SECRET === DEV_ADMIN_SECRET) 
   // eslint-disable-next-line no-console
   console.error('\n❌ ADMIN_JWT_SECRET must be set to a strong secret in production.\n');
   process.exit(1);
+}
+
+// Warn (don't crash) in production if the datastore connection strings don't use
+// an encrypted scheme. We only warn — some secure transports are legitimately
+// non-TLS (e.g. Railway's private IPv6 network uses redis://), so hard-failing
+// here would break valid deployments. Review the warning against your topology.
+if (env.NODE_ENV === 'production') {
+  const mongoTls =
+    /^mongodb\+srv:\/\//.test(env.MONGODB_URI) || /[?&](tls|ssl)=true/i.test(env.MONGODB_URI);
+  const redisTls = /^rediss:\/\//.test(env.REDIS_URL);
+  const insecure: string[] = [];
+  if (!mongoTls) insecure.push('MONGODB_URI (expected mongodb+srv:// or tls=true)');
+  if (!redisTls) insecure.push('REDIS_URL (expected rediss://)');
+  if (insecure.length > 0) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `⚠️  Datastore connection(s) not using TLS in production: ${insecure.join(', ')}. ` +
+        `Ensure traffic is on a trusted private network or switch to a TLS scheme.`,
+    );
+  }
 }
 
 /** Warn (don't crash) about external integrations that aren't configured yet. */

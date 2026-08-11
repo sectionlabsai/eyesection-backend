@@ -9,6 +9,11 @@ import { logger } from '../utils/logger';
 
 const BCRYPT_ROUNDS = 12;
 
+// A valid cost-12 bcrypt hash of a throwaway string. When login is attempted for
+// an unknown email we still run a compare against this so response timing does
+// not reveal whether the email exists (user-enumeration oracle).
+const DUMMY_BCRYPT_HASH = '$2b$12$MX16Gjnp1/abrhQREO6sau87hY8XXzG5V6p/MGw8IfFnr9IvSb5wi';
+
 /** Strip sensitive fields before returning a user to the client. */
 export function sanitizeUser(user: IUser): Record<string, unknown> {
   const obj = user.toObject ? user.toObject() : user;
@@ -132,6 +137,8 @@ export async function login(email: string, password: string): Promise<AuthResult
   // Generic error regardless of which part fails — never reveal if the email exists.
   const user = await User.findOne({ email: email.toLowerCase() }).select('+passwordHash');
   if (!user || !user.passwordHash) {
+    // Run a compare anyway so timing matches the found-user path (no enumeration).
+    await bcrypt.compare(password, DUMMY_BCRYPT_HASH);
     throw new AppError(401, 'Invalid email or password', 'INVALID_CREDENTIALS');
   }
   const ok = await bcrypt.compare(password, user.passwordHash);

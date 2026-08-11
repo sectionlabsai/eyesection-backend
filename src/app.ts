@@ -1,6 +1,7 @@
 import express, { Application, Request, Response } from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
+import { env } from './config/env';
 import { pingDB } from './config/db';
 import { pingRedis } from './config/redis';
 import { buildCorsOptions } from './config/cors';
@@ -23,17 +24,34 @@ import accountRoutes from './routes/account.routes';
 import deviceRoutes from './routes/device.routes';
 import adminRoutes from './routes/admin.routes';
 
+/**
+ * Express `trust proxy` accepts a number (hop count), boolean, or string
+ * (subnet list / preset). Parse the env string into the right shape so a pure
+ * integer becomes a hop count rather than being treated as a single-host list.
+ */
+function parseTrustProxy(value: string): boolean | number | string {
+  const v = value.trim();
+  if (v === 'true') return true;
+  if (v === 'false') return false;
+  if (/^\d+$/.test(v)) return Number(v);
+  return v;
+}
+
+// Base64 eye scans need a large body cap (see EB-04); every other endpoint gets
+// a small cap so they don't inherit a multi-megabyte request DoS surface.
+const SCAN_BODY_LIMIT = '12mb';
+const DEFAULT_BODY_LIMIT = '256kb';
+
 export function createApp(): Application {
   const app = express();
 
-  app.set('trust proxy', 1);
+  // Must match the real number of proxy hops in front of the app, or req.ip
+  // (the rate-limit key) becomes spoofable via X-Forwarded-For. Configurable
+  // via TRUST_PROXY to match the deployment topology.
+  app.set('trust proxy', parseTrustProxy(env.TRUST_PROXY));
   app.use(helmet());
   app.use(cors(buildCorsOptions()));
   app.use(requestId);
-
-  // 12mb body limit — eye scans can be posted as base64 (see EB-04).
-  app.use(express.json({ limit: '12mb' }));
-  app.use(express.urlencoded({ extended: true, limit: '12mb' }));
 
   // Liveness: is the process up and serving? Never touches dependencies, so a
   // dependency blip can't trigger a container restart.
@@ -59,10 +77,23 @@ export function createApp(): Application {
     });
   });
 
+  // Scans mount FIRST with the large body parser, scoped to this router only.
+  // Its requests are fully handled here and never fall through to the small
+  // default parser registered below, so the 12mb cap stays contained to /scans.
+  app.use(
+    '/scans',
+    express.json({ limit: SCAN_BODY_LIMIT }),
+    defaultRateLimit,
+    scanRoutes,
+  ); // EB-04 / EB-05
+
+  // Small default body parser for every other route.
+  app.use(express.json({ limit: DEFAULT_BODY_LIMIT }));
+  app.use(express.urlencoded({ extended: true, limit: DEFAULT_BODY_LIMIT }));
+
   // Default limit (100/min/IP) on the API surface; /health stays unmetered.
   // Auth routes apply their own stricter limit (10/min/IP).
   app.use('/auth', authRoutes); // EB-03
-  app.use('/scans', defaultRateLimit, scanRoutes); // EB-04 / EB-05
   app.use('/comfort', defaultRateLimit, comfortRoutes); // EB-07
   app.use('/coach', defaultRateLimit, coachRoutes); // EB-08
   app.use('/chat', defaultRateLimit, chatRoutes); // EB-13
