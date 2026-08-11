@@ -53,6 +53,22 @@ test('dominantIrisHsl recovers the iris hue past pupil and neutral pixels', () =
   assert.ok(Math.abs(s.chromaticFraction - 4 / 7) < 1e-6);
 });
 
+test('dominantIrisHsl keeps a brown iris warm despite a saturated cool reflection', () => {
+  // A brown iris is many faintly-warm pixels; a screen/window glint is a few
+  // strongly-saturated blue pixels. A saturation-weighted circular mean gets
+  // dragged cool by the glint; the count-based dominant cluster does not.
+  const warm: [number, number, number] = [118, 92, 74]; // desaturated warm brown
+  const blue: [number, number, number] = [40, 70, 175]; // strong cool reflection
+  const buf = pixels(
+    ...Array(14).fill(warm),
+    ...Array(5).fill(blue),
+  );
+  const s = dominantIrisHsl(buf, 3, { skipDark: 55, skipBright: 235, minChroma: 0.1 });
+  assert.ok(s);
+  // The warm pigment cluster wins → warm hue, not the blue reflection.
+  assert.ok(s.h < 60 || s.h > 300, `hue ${s.h} should read warm, not cool`);
+});
+
 test('dominantIrisHsl reports zero chroma for a colourless crop', () => {
   const s = dominantIrisHsl(pixels([100, 100, 100], [110, 110, 110], [90, 90, 90]), 3, {
     skipDark: 55,

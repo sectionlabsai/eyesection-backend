@@ -30,7 +30,9 @@ const TEXTURE_PX = 96; // higher-res, edge-preserving grid for fine-line texture
 const SKIN_SAMPLE: AverageRgbOpts = { skipDark: 20, skipBright: 245, trim: 0.1 };
 // Iris: exclude the pupil (dark) and any flash glint / sclera (bright), then read
 // a saturation-weighted dominant hue so the neutral pupil can't wash the colour.
-const IRIS_SKIP = { skipDark: 55, skipBright: 235, minChroma: 0.1 };
+// skipBright is kept fairly tight so bright reflections/sclera bleed don't get a
+// vote (dominantIrisHsl additionally drops bright, desaturated sclera-like px).
+const IRIS_SKIP = { skipDark: 55, skipBright: 220, minChroma: 0.1 };
 
 /** Extract a normalized rect and return its raw downsampled RGB pixels. */
 async function regionPixels(

@@ -84,14 +84,20 @@ function median(values: number[]): number {
 }
 
 /**
- * Dominant iris colour, robust to the pupil and sclera. Averaging raw RGB over
- * an iris crop yields "a colour that exists nowhere" — the dark neutral pupil
- * and any glint drag saturation to zero and force a false grey. Instead:
- *  - drop pupil-dark and sclera-bright pixels,
- *  - take a SATURATION-WEIGHTED circular mean of hue, so neutral pixels (pupil,
- *    lashes) contribute ~nothing and the coloured iris ring dominates,
- *  - report saturation from the coloured pixels only (median), not the diluted
- *    whole-crop mean, and lightness as the median of survivors.
+ * Dominant iris colour, robust to the pupil, sclera AND stray reflections.
+ * Averaging (or vector-meaning) hue over an iris crop is fragile: the dark
+ * neutral pupil forces a false grey, and a few strongly-coloured reflection
+ * pixels (a cool screen/window glint) can drag a circular mean right across the
+ * wheel — so the SAME brown eye can read warm on one scan and blue on the next.
+ * Instead:
+ *  - drop pupil-dark, sclera-bright, and bright desaturated sclera-like pixels
+ *    (the latter otherwise inflate lightness and wash a deep brown into grey),
+ *  - find the dominant hue by a SATURATION-WEIGHTED HISTOGRAM and take the
+ *    winning bin (plus its two neighbours): the largest coherent colour CLUSTER
+ *    wins, so a minority of off-hue reflections can't flip the result no matter
+ *    how saturated they are,
+ *  - report hue + saturation from that dominant cluster only, and lightness as
+ *    the median of survivors.
  * `chromaticFraction` lets the classifier lower confidence when the crop had
  * almost no real colour to read.
  */
@@ -104,9 +110,11 @@ export function dominantIrisHsl(
   const skipBright = opts.skipBright ?? 235;
   const minChroma = opts.minChroma ?? 0.1;
 
-  let hx = 0;
-  let hy = 0;
-  const chromaSats: number[] = [];
+  const BINS = 24; // 15° hue buckets
+  const BIN_W = 360 / BINS;
+  const binWeight = new Array<number>(BINS).fill(0);
+  const hues: number[] = [];
+  const sats: number[] = [];
   const lights: number[] = [];
   let survivors = 0;
 
@@ -116,29 +124,76 @@ export function dominantIrisHsl(
     const pb = data[i + 2];
     const lum = (pr + pg + pb) / 3;
     if (lum < skipDark || lum > skipBright) continue;
-    survivors += 1;
 
     const { h, s, l } = rgbToHsl(pr, pg, pb);
+    // Bright + desaturated = sclera / lid highlight bleeding into the crop.
+    // Excluding it keeps the median lightness on the real iris (a genuinely grey
+    // iris sits at mid lightness, l≈0.45–0.55, so it survives this l>0.6 gate).
+    if (s < 0.2 && l > 0.6) continue;
+    survivors += 1;
     lights.push(l);
+
     if (s >= minChroma) {
-      const rad = (h * Math.PI) / 180;
-      hx += s * Math.cos(rad);
-      hy += s * Math.sin(rad);
-      chromaSats.push(s);
+      const bin = Math.floor(h / BIN_W) % BINS;
+      // Vote by COUNT, not saturation: the iris pigment is the majority of
+      // coloured pixels (the whole ring), while a reflection is a localised
+      // minority — so counting finds the pigment cluster even when the
+      // reflection pixels are individually far more saturated. Saturation still
+      // refines the hue WITHIN the winning cluster below.
+      binWeight[bin] += 1;
+      hues.push(h);
+      sats.push(s);
     }
   }
 
   if (survivors === 0) return null;
   const l = median(lights);
 
-  if (chromaSats.length === 0) {
+  if (hues.length === 0) {
     // Genuinely colourless crop — return neutral, but flag zero chroma so the
     // classifier treats the colour as unreliable rather than confidently grey.
     return { h: 0, s: 0, l, chromaticFraction: 0 };
   }
 
+  // Winning window = the bin (with its two circular neighbours) holding the most
+  // saturation weight — i.e. the dominant colour cluster.
+  let bestBin = 0;
+  let bestScore = -1;
+  for (let b = 0; b < BINS; b += 1) {
+    const score =
+      binWeight[(b - 1 + BINS) % BINS] + binWeight[b] + binWeight[(b + 1) % BINS];
+    if (score > bestScore) {
+      bestScore = score;
+      bestBin = b;
+    }
+  }
+
+  // Saturation-weighted circular mean of the pixels inside that window only.
+  let hx = 0;
+  let hy = 0;
+  let sumSat = 0;
+  for (let k = 0; k < hues.length; k += 1) {
+    const bin = Math.floor(hues[k] / BIN_W) % BINS;
+    const dist = Math.min((bin - bestBin + BINS) % BINS, (bestBin - bin + BINS) % BINS);
+    if (dist > 1) continue;
+    const w = sats[k];
+    const rad = (hues[k] * Math.PI) / 180;
+    hx += w * Math.cos(rad);
+    hy += w * Math.sin(rad);
+    sumSat += w;
+  }
+
   const h = ((Math.atan2(hy, hx) * 180) / Math.PI + 360) % 360;
-  return { h, s: median(chromaSats), l, chromaticFraction: chromaSats.length / survivors };
+  // Saturation of the dominant cluster (weighted mean), not diluted by faint
+  // off-cluster pixels.
+  const clusterSats = sats.filter((_, k) => {
+    const bin = Math.floor(hues[k] / BIN_W) % BINS;
+    const dist = Math.min((bin - bestBin + BINS) % BINS, (bestBin - bin + BINS) % BINS);
+    return dist <= 1;
+  });
+  const s = clusterSats.reduce((a, v) => a + v * v, 0) / sumSat;
+
+  return { h, s, l, chromaticFraction: hues.length / survivors };
 }
 
 export interface AverageRgbOpts {
