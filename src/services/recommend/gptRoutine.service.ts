@@ -1,7 +1,9 @@
 import OpenAI from 'openai';
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { env } from '../../config/env';
 import { logger } from '../../utils/logger';
+import { getRedis } from '../../config/redis';
 import { sanitizeForPrompt, sanitizeListForPrompt } from '../../utils/prompt';
 import {
   EyeRoutine,
@@ -241,10 +243,63 @@ function profileLines(ctx?: RoutineUserContext): string {
   return `\nUser profile (personalize the schedule around this):\n${lines.join('\n')}\n`;
 }
 
+// The generated routine is a pure function of the DISCRETE concern levels and
+// the (sanitized) profile inputs the model is shown — not the exact continuous
+// severities — so two scans with the same levels + profile can reuse one
+// generation. Cached routines carry no user identifiers (only cosmetic advice),
+// so the key is global across users to maximize the hit rate. Bump the version
+// prefix if the prompt/shape changes so stale entries are ignored.
+const ROUTINE_CACHE_TTL_SEC = 7 * 24 * 60 * 60; // 7 days
+const routineCacheKey = (fingerprint: string): string => `routine:v1:${fingerprint}`;
+
+/** Stable fingerprint of everything that determines the generated routine. */
+function routineFingerprint(
+  selected: string[],
+  analysis: RoutineAnalysis,
+  ctx?: RoutineUserContext,
+): string {
+  const levels = selected.map((k) => `${k}:${concernLevel(analysis, k)}`);
+  const profile = [
+    `goal=${(ctx?.goal ?? '').trim().toLowerCase()}`,
+    `comfort=${(ctx?.baselineComfort ?? '').trim().toLowerCase()}`,
+    `screen=${ctx?.dailyScreenHours ?? ''}`,
+    `night=${ctx?.nightPhoneUse ?? ''}`,
+    `products=${[...(ctx?.careProducts ?? [])]
+      .map((p) => p.trim().toLowerCase())
+      .sort()
+      .join('|')}`,
+  ];
+  return createHash('sha1').update([...levels, ...profile].join(';')).digest('hex');
+}
+
+/** Read a cached routine. Fails open (returns null) on any Redis/parse error. */
+async function readRoutineCache(key: string): Promise<EyeRoutine | null> {
+  try {
+    const raw = await getRedis().get(key);
+    return raw ? (JSON.parse(raw) as EyeRoutine) : null;
+  } catch (err) {
+    logger.warn('Routine cache read failed — generating fresh', err);
+    return null;
+  }
+}
+
+/** Best-effort cache write — a Redis error never blocks returning the routine. */
+async function writeRoutineCache(key: string, routine: EyeRoutine): Promise<void> {
+  try {
+    await getRedis().set(key, JSON.stringify(routine), 'EX', ROUTINE_CACHE_TTL_SEC);
+  } catch (err) {
+    logger.warn('Routine cache write failed', err);
+  }
+}
+
 /**
  * Generate a tailored cosmetic tip set for EVERY vital marker on this scan,
  * plus morning / evening / weekly care blocks. Falls back to the curated
  * catalog when no model is configured, the call fails, or the model skips a concern.
+ *
+ * Results are cached in Redis keyed by the concern levels + profile, so repeat
+ * scans with a similar profile reuse one text-model call instead of paying for a
+ * fresh generation each time.
  */
 export async function generateEyeRoutine(
   analysis: RoutineAnalysis,
@@ -255,6 +310,16 @@ export async function generateEyeRoutine(
   const selected = allMetricConcerns(analysis, concerns);
   const fallbackSchedule = buildCareSchedule(analysis, concerns);
   if (!openai) return buildEyeRoutine(analysis, concerns);
+
+  // Only the model-backed path is worth caching (the curated fallback is local
+  // and cheap). Reuse a prior generation for the same levels + profile.
+  const cacheKey = selected.length > 0
+    ? routineCacheKey(routineFingerprint(selected, analysis, userContext))
+    : null;
+  if (cacheKey) {
+    const cached = await readRoutineCache(cacheKey);
+    if (cached) return cached;
+  }
 
   let intro = 'A few gentle, cosmetic habits to help your eye area look and feel its freshest.';
   const gptSteps = new Map<string, RoutineStep>();
@@ -319,9 +384,11 @@ export async function generateEyeRoutine(
     .filter((s): s is RoutineStep => !!s);
 
   if (steps.length === 0) return buildEyeRoutine(analysis, concerns);
-  return {
+  const routine: EyeRoutine = {
     intro,
     steps,
     schedule: mergeSchedule(gptSchedule, fallbackSchedule),
   };
+  if (cacheKey) await writeRoutineCache(cacheKey, routine);
+  return routine;
 }

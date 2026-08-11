@@ -1,4 +1,4 @@
-import { Queue, Worker, JobsOptions, Job } from 'bullmq';
+import { Queue, Worker, JobsOptions, Job, WorkerOptions } from 'bullmq';
 import IORedis from 'ioredis';
 import { env } from './env';
 import { logger } from '../utils/logger';
@@ -48,12 +48,22 @@ export async function enqueueAnalyzeScan(scanId: string): Promise<void> {
  * errors so BullMQ retries them.
  */
 export function startAnalyzeWorker(): Worker<AnalyzeJobData> {
+  const options: WorkerOptions = {
+    connection: makeConnection(),
+    concurrency: env.ANALYZE_CONCURRENCY,
+  };
+  // Fleet-wide throughput cap (BullMQ enforces `limiter` globally across all
+  // workers on the queue via Redis), so scaling worker replicas can't blow past
+  // the OpenAI rate limit / budget. Opt out with ANALYZE_MAX_PER_MIN=0.
+  if (env.ANALYZE_MAX_PER_MIN > 0) {
+    options.limiter = { max: env.ANALYZE_MAX_PER_MIN, duration: 60_000 };
+  }
   const worker = new Worker<AnalyzeJobData>(
     ANALYZE_QUEUE,
     async (job: Job<AnalyzeJobData>) => {
       await processScan(job.data.scanId);
     },
-    { connection: makeConnection(), concurrency: env.ANALYZE_CONCURRENCY },
+    options,
   );
 
   worker.on('failed', (job, err) =>

@@ -28,6 +28,23 @@ const schema = z.object({
   // (value × 3) under your OpenAI rate limit (RPM/TPM) and DB pool headroom.
   ANALYZE_CONCURRENCY: z.coerce.number().int().min(1).max(50).default(10),
 
+  // Global cap (across ALL worker replicas, enforced via Redis) on scans the
+  // analyze queue processes per minute — a fleet-wide ceiling that protects the
+  // OpenAI budget/rate-limit from a queue flood or over-scaled worker pool. Each
+  // scan is ~3 vision calls, so effective vision RPM ≈ this × 3. Set 0 to
+  // disable the limiter entirely.
+  ANALYZE_MAX_PER_MIN: z.coerce.number().int().min(0).default(180),
+
+  // MongoDB connection pool + timeout tuning (per process). The driver default
+  // pool is 100, which — multiplied across replicas — can exhaust an Atlas
+  // tier's connection cap; 20 is ample for ANALYZE_CONCURRENCY + HTTP traffic.
+  // Raise for high-throughput single instances, lower for many small replicas.
+  MONGO_MAX_POOL_SIZE: z.coerce.number().int().min(1).max(500).default(20),
+  MONGO_MIN_POOL_SIZE: z.coerce.number().int().min(0).default(0),
+  // Fail fast instead of hanging when no primary is reachable / a socket stalls.
+  MONGO_SERVER_SELECTION_TIMEOUT_MS: z.coerce.number().int().min(1000).default(10000),
+  MONGO_SOCKET_TIMEOUT_MS: z.coerce.number().int().min(1000).default(45000),
+
   // Days a never-upgraded anonymous-first user (EB-13) is kept before the daily
   // cleanup job purges it via the GDPR cascade.
   ANON_TTL_DAYS: z.coerce.number().int().min(1).default(30),

@@ -13,7 +13,7 @@ import {
   FINELINES_CUTOFFS,
   DULLNESS_CUTOFFS,
 } from './lab.service';
-import { classifyWithGpt } from './gpt.service';
+import { classifyWithGpt, fallbackFromLab } from './gpt.service';
 import { invalidateChatContext } from '../chatCache';
 import { ScanGeometry, ReconciledAnalysis } from './types';
 import { computeFreshness } from '../scoring/freshness.service';
@@ -84,8 +84,16 @@ export async function processScan(scanId: string): Promise<void> {
     // full-face photo is never displayed in the app.
     const eyeCrop = await extractEyeRegionJpeg(imageBuffer, geometry);
 
-    const lab = await computeLab(imageBuffer, geometry);
-    const gpt = await classifyWithGpt(imageBuffer, lab, geometry, eyeCrop);
+    // Run the local LAB analysis and the vision-model ensemble concurrently:
+    // the model call no longer depends on the LAB result (only the code-only
+    // fallback does), so the multi-second GPT round overlaps the LAB pixel math
+    // instead of waiting for it. The fallback is applied here if the model was
+    // unavailable — LAB is guaranteed resolved by then.
+    const [lab, gptResult] = await Promise.all([
+      computeLab(imageBuffer, geometry),
+      classifyWithGpt(imageBuffer, geometry, eyeCrop),
+    ]);
+    const gpt = gptResult ?? fallbackFromLab(lab);
 
     // Never present fabricated fallback defaults as a real result: when a vision
     // model IS configured but the ensemble couldn't be reached, fail the scan

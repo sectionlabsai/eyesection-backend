@@ -11,8 +11,15 @@ export async function connectDB(): Promise<void> {
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt += 1) {
     try {
-      await mongoose.connect(env.MONGODB_URI);
-      logger.info('MongoDB connected');
+      await mongoose.connect(env.MONGODB_URI, {
+        maxPoolSize: env.MONGO_MAX_POOL_SIZE,
+        minPoolSize: env.MONGO_MIN_POOL_SIZE,
+        serverSelectionTimeoutMS: env.MONGO_SERVER_SELECTION_TIMEOUT_MS,
+        socketTimeoutMS: env.MONGO_SOCKET_TIMEOUT_MS,
+      });
+      logger.info(
+        `MongoDB connected (pool ${env.MONGO_MIN_POOL_SIZE}-${env.MONGO_MAX_POOL_SIZE})`,
+      );
       mongoose.connection.on('disconnected', () =>
         logger.warn('MongoDB disconnected'),
       );

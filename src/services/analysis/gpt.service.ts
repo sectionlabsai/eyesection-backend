@@ -221,21 +221,23 @@ async function gatherSamples(content: ImageContent): Promise<Sample[]> {
 
 /**
  * Rate eye-area appearance by averaging SAMPLES parallel calls, retrying the
- * whole round once to survive a transient provider blip. Falls back to code-only
- * values ONLY when no vision model is configured or every attempt fails — the
- * pipeline refuses to persist a fallback when a model is configured. Provider
- * errors are swallowed here and must NEVER reach the user.
+ * whole round once to survive a transient provider blip.
+ *
+ * Returns `null` when no vision model is configured or every attempt fails —
+ * the caller supplies the code-only fallback (`fallbackFromLab`). Decoupling the
+ * fallback from this call means the model request no longer depends on the LAB
+ * result, so the pipeline can run LAB analysis and this vision call in parallel.
+ * Provider errors are swallowed here and must NEVER reach the user.
  */
 export async function classifyWithGpt(
   imageBuffer: Buffer,
-  lab: LabAnalysis,
   geometry: ScanGeometry,
   precomputedCrop?: Buffer | null,
-): Promise<GptClassification> {
+): Promise<GptClassification | null> {
   const openai = getClient();
   if (!openai) {
     logger.warn('OPENAI_API_KEY not set — using code-only classification');
-    return fallbackFromLab(lab);
+    return null;
   }
 
   // Reuse the crop the pipeline already extracted (it persists it for display);
@@ -258,6 +260,6 @@ export async function classifyWithGpt(
     }
   }
 
-  logger.warn('Vision rating unavailable — falling back to code-only values');
-  return fallbackFromLab(lab);
+  logger.warn('Vision rating unavailable — caller will fall back to code-only values');
+  return null;
 }
