@@ -6,8 +6,19 @@ import { requireUser } from '../services/comfort.service';
 const hhmm = z
   .string()
   .regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Time must be HH:mm (24h)');
+const endHhmm = z.union([hhmm, z.literal('24:00')]);
 
-const activeHoursSchema = z.object({ start: hhmm, end: hhmm });
+function minutes(hhmmValue: string): number {
+  const [hour, minute] = hhmmValue.split(':').map(Number);
+  return hour * 60 + minute;
+}
+
+export const activeHoursSchema = z
+  .object({ start: hhmm, end: endHhmm })
+  .refine((hours) => minutes(hours.start) < minutes(hours.end), {
+    message: 'Active hours must end after they start',
+    path: ['end'],
+  });
 
 const reminderType = z.enum(['2020', 'blink', 'hydrate', 'winddown']);
 
@@ -37,7 +48,7 @@ export async function getPlan(req: Request, res: Response): Promise<void> {
   res.status(200).json({ plan: plan ? coachService.toLocalReminders(plan) : null });
 }
 
-const updateSchema = z.object({
+export const updateSchema = z.object({
   activeHours: activeHoursSchema.optional(),
   active: z.boolean().optional(),
   reminders: z
@@ -45,8 +56,8 @@ const updateSchema = z.object({
       z.object({
         type: reminderType,
         enabled: z.boolean().optional(),
-        intervalMin: z.number().int().min(5).max(240).optional(),
-        atTime: hhmm.optional(),
+        intervalMin: z.number().int().min(5).max(120).optional(),
+        atTime: endHhmm.optional(),
       }),
     )
     .optional(),

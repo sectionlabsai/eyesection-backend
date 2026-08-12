@@ -43,7 +43,13 @@ const reminderSchema = new Schema<IReminder>(
 
 const breakPlanSchema = new Schema<IBreakPlan>(
   {
-    userId: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    userId: {
+      type: Schema.Types.ObjectId,
+      ref: 'User',
+      required: true,
+      index: true,
+      unique: true,
+    },
     template: { type: String, required: true },
     reminders: { type: [reminderSchema], default: [] },
     activeHours: {

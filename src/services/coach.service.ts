@@ -213,7 +213,10 @@ export function toLocalReminders(plan: IBreakPlan): {
   }>;
 } {
   return {
-    activeHours: plan.activeHours,
+    activeHours: {
+      start: plan.activeHours.start,
+      end: plan.activeHours.end,
+    },
     active: plan.active,
     reminders: plan.reminders
       .filter((r) => r.enabled)
