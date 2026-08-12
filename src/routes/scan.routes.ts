@@ -1,8 +1,9 @@
 import { Router } from 'express';
 import * as scanController from '../controllers/scan.controller';
 import { asyncHandler } from '../utils/asyncHandler';
-import { optionalAuth } from '../middleware/auth';
+import { optionalAuth, requireAuth } from '../middleware/auth';
 import { requireConsent } from '../middleware/consent';
+import { requirePremium } from '../services/entitlement.service';
 
 const router = Router();
 
@@ -14,5 +15,12 @@ router.post('/upload', optionalAuth, requireConsent, asyncHandler(scanController
 // isn't captured by the id param route.
 router.get('/', optionalAuth, asyncHandler(scanController.list));
 router.get('/:id', optionalAuth, asyncHandler(scanController.getById));
+// On-demand routine regeneration — premium-only, daily-capped (see service).
+router.post(
+  '/:id/routine/regenerate',
+  requireAuth,
+  requirePremium,
+  asyncHandler(scanController.regenerateRoutine),
+);
 
 export default router;

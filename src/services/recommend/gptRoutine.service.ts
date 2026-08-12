@@ -58,6 +58,20 @@ export interface RoutineUserContext {
   nightPhoneUse?: boolean;
 }
 
+/** Options controlling how a routine is generated. */
+export interface RoutineGenOptions {
+  /**
+   * Bypass the shared Redis cache (both read AND write) and ask the model for a
+   * genuinely fresh variation. Used by the user-triggered "regenerate" action —
+   * without this a regenerate with unchanged levels+profile would just return
+   * the identical cached text. Skipping the write keeps the global cache clean
+   * and deterministic for the automatic post-scan path.
+   */
+  forceFresh?: boolean;
+  /** Extra entropy mixed into the prompt so repeat regenerations differ. */
+  variationSeed?: string;
+}
+
 const SYSTEM_PROMPT = `You are a gentle COSMETIC eye-area wellness coach for a beauty & wellness app.
 You are given the eye-area appearance findings for one person. Write short,
 warm, PRACTICAL cosmetic & lifestyle tips tailored to those findings.
@@ -305,6 +319,7 @@ export async function generateEyeRoutine(
   analysis: RoutineAnalysis,
   concerns: string[] = [],
   userContext?: RoutineUserContext,
+  options: RoutineGenOptions = {},
 ): Promise<EyeRoutine> {
   const openai = getClient();
   const selected = allMetricConcerns(analysis, concerns);
@@ -312,8 +327,10 @@ export async function generateEyeRoutine(
   if (!openai) return buildEyeRoutine(analysis, concerns);
 
   // Only the model-backed path is worth caching (the curated fallback is local
-  // and cheap). Reuse a prior generation for the same levels + profile.
-  const cacheKey = selected.length > 0
+  // and cheap). Reuse a prior generation for the same levels + profile. A
+  // forceFresh (regenerate) request skips the cache entirely so the user gets a
+  // new variation and the shared global cache is left untouched.
+  const cacheKey = !options.forceFresh && selected.length > 0
     ? routineCacheKey(routineFingerprint(selected, analysis, userContext))
     : null;
   if (cacheKey) {
@@ -329,17 +346,29 @@ export async function generateEyeRoutine(
     const findings = selected
       .map((key) => `- ${key.replace(/_/g, ' ')}: ${concernLevel(analysis, key)}`)
       .join('\n');
+    // On a regenerate, nudge the model toward a genuinely different-but-valid
+    // set of habits and phrasing (the variation token adds entropy so repeat
+    // regenerations don't converge on the same wording).
+    const variationLine = options.forceFresh
+      ? `\n\nThis is a REGENERATION: produce a genuinely fresh alternative — vary the ` +
+        `specific habits, emphasis, and phrasing while staying accurate to the findings ` +
+        `and within every rule above. Variation token: ${options.variationSeed ?? Date.now()}.`
+      : '';
     const userPrompt =
       `Findings to address (write a step with EXACTLY 3 tips for each, in this order):\n${findings}\n\n` +
       `Use exactly these concern keys: ${selected.join(', ')}.` +
       profileLines(userContext) +
       `\nAlso write schedule.morning, schedule.evening, and schedule.weekly — each with a short title and EXACTLY 3 tips ` +
-      `suited to this person's findings and profile (morning refresh, evening wind-down, weekly focus).`;
+      `suited to this person's findings and profile (morning refresh, evening wind-down, weekly focus).` +
+      variationLine;
 
     try {
       const res = await openai.chat.completions.create({
         model: env.OPENAI_TEXT_MODEL,
         response_format: RESPONSE_FORMAT,
+        // Higher temperature only on regenerate so the fresh set really differs;
+        // the automatic post-scan path keeps the model's default for stability.
+        ...(options.forceFresh ? { temperature: 1 } : {}),
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user', content: userPrompt },

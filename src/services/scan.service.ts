@@ -9,6 +9,13 @@ import { isPremium } from './entitlement.service';
 import { getRedis } from '../config/redis';
 import { env } from '../config/env';
 import { logger } from '../utils/logger';
+import { localDayKey } from '../utils/day';
+import { Level } from '../types/levels';
+import {
+  RoutineAnalysis,
+  RoutineMetric,
+} from './recommend/routine.service';
+import { generateEyeRoutine } from './recommend/gptRoutine.service';
 
 /** Guests and free accounts get exactly one successful/in-flight scan. */
 const FREE_SCAN_LIMIT = 1;
@@ -268,4 +275,119 @@ export async function listScans(
 
   const views = await Promise.all(scans.map((scan) => toSignedView(scan)));
   return { scans: views };
+}
+
+/** Premium daily cap on user-triggered routine regenerations. */
+const ROUTINE_REGEN_DAILY_LIMIT = 5;
+/** Dated key self-cleans a day after roll-over. */
+const ROUTINE_REGEN_QUOTA_TTL_SEC = 2 * 24 * 60 * 60;
+const routineRegenQuotaKey = (userId: string, dayKey: string): string =>
+  `routine:regen:quota:${userId}:${dayKey}`;
+
+const LEVEL_RANK: Record<Level, number> = { none: 0, mild: 1, moderate: 2, high: 3 };
+
+/**
+ * Rebuild the routine generator's input from a completed scan's stored levels
+ * (analysis.*) + continuous severities (aiRaw.severities). Severity falls back
+ * to a level-derived value for older scans that predate aiRaw.severities.
+ */
+function routineAnalysisFromScan(
+  analysis: NonNullable<IEyeScan['analysis']>,
+  aiRaw: unknown,
+): RoutineAnalysis {
+  const sev =
+    (aiRaw as { severities?: Record<string, number> } | undefined)?.severities ?? {};
+  const symmetry = analysis.symmetryScore / 100;
+  const symmetryLevel: Level =
+    symmetry >= 0.85 ? 'none' : symmetry >= 0.7 ? 'mild' : symmetry >= 0.55 ? 'moderate' : 'high';
+  const metric = (level: Level, severity: number | undefined): RoutineMetric => ({
+    level,
+    severity: severity ?? LEVEL_RANK[level] / 3,
+  });
+  return {
+    darkCircles: metric(analysis.darkCircles.level, sev.darkCircles),
+    puffiness: metric(analysis.puffiness.level, sev.puffiness),
+    redness: metric(analysis.redness.level, sev.redness),
+    tiredLook: metric(analysis.tiredLook.level, sev.tiredLook),
+    fineLines: metric(analysis.fineLines.level, sev.fineLines),
+    radiance: metric(analysis.radiance.level, sev.radiance),
+    symmetry: metric(symmetryLevel, sev.symmetry ?? 1 - symmetry),
+  };
+}
+
+/**
+ * Regenerate the cosmetic routine for one of the caller's completed scans on
+ * demand — a fresh variation from the SAME scan findings + current profile
+ * (bypasses the shared cache). Premium-only and daily-capped: requireAuth +
+ * requirePremium run in the route, and this counts a per-user daily allowance
+ * (only a SUCCESSFUL regenerate is charged). Returns the updated scan view.
+ */
+export async function regenerateRoutine(
+  scanId: string,
+  requesterId: string,
+): Promise<Record<string, unknown>> {
+  if (!Types.ObjectId.isValid(scanId)) {
+    throw new AppError(404, 'Scan not found', 'SCAN_NOT_FOUND');
+  }
+  const scan = await EyeScan.findById(scanId);
+  if (!scan) throw new AppError(404, 'Scan not found', 'SCAN_NOT_FOUND');
+
+  // Owner-only: never regenerate an anonymous scan or someone else's.
+  if (!scan.userId || scan.userId.toString() !== requesterId) {
+    throw new AppError(403, 'You do not have access to this scan', 'SCAN_FORBIDDEN');
+  }
+  const analysis = scan.analysis;
+  if (scan.status !== 'complete' || !analysis) {
+    throw new AppError(409, 'This scan has no routine to regenerate yet', 'SCAN_NOT_READY');
+  }
+
+  const user = await User.findById(requesterId).select(
+    'concerns goal careProducts baselineComfort screenProfile notificationPrefs.timezone',
+  );
+
+  // Read the daily allowance BEFORE spending a GPT call; fail open on a Redis
+  // blip so an outage never blocks a paying user.
+  const tz = user?.notificationPrefs?.timezone || 'UTC';
+  const quotaKey = routineRegenQuotaKey(requesterId, localDayKey(new Date(), tz));
+  let used = 0;
+  try {
+    used = Number(await getRedis().get(quotaKey)) || 0;
+  } catch (err) {
+    logger.warn('Routine regen quota read failed — allowing', err);
+  }
+  if (used >= ROUTINE_REGEN_DAILY_LIMIT) {
+    throw new AppError(
+      429,
+      "You've reached today's routine refresh limit. Check back tomorrow.",
+      'ROUTINE_REGEN_LIMIT',
+    );
+  }
+
+  const routine = await generateEyeRoutine(
+    routineAnalysisFromScan(analysis, scan.aiRaw),
+    user?.concerns ?? [],
+    {
+      goal: user?.goal,
+      careProducts: user?.careProducts,
+      baselineComfort: user?.baselineComfort,
+      dailyScreenHours: user?.screenProfile?.dailyScreenHours,
+      nightPhoneUse: user?.screenProfile?.nightPhoneUse,
+    },
+    { forceFresh: true, variationSeed: `${scanId}:${Date.now()}` },
+  );
+
+  analysis.routine = routine; // same subdoc ref as scan.analysis
+  scan.markModified('analysis.routine'); // Mixed subfield — flag so it persists.
+  await scan.save();
+
+  // Only a successful regenerate is charged against the daily cap.
+  try {
+    const redis = getRedis();
+    const next = await redis.incr(quotaKey);
+    if (next === 1) await redis.expire(quotaKey, ROUTINE_REGEN_QUOTA_TTL_SEC);
+  } catch (err) {
+    logger.warn('Routine regen quota consume failed — not counting', err);
+  }
+
+  return toSignedView(scan);
 }

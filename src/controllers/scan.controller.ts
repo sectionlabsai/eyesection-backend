@@ -36,3 +36,10 @@ export async function list(req: Request, res: Response): Promise<void> {
   const result = await scanService.listScans(req.userId);
   res.status(200).json(result);
 }
+
+// requireAuth + requirePremium run before this (see routes), so req.userId is
+// always a premium user here.
+export async function regenerateRoutine(req: Request, res: Response): Promise<void> {
+  const result = await scanService.regenerateRoutine(req.params.id, req.userId!);
+  res.status(200).json(result);
+}
